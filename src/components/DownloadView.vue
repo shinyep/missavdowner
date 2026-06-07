@@ -267,7 +267,7 @@
                 @click="retryTask(task.id)"
               >
                 <span class="material-symbols-outlined text-xs">refresh</span>
-                重试
+                {{ task.downloadMode === 'novel' ? '重新转码' : '重试' }}
               </button>
               <button
                 v-if="task.status === 'downloading'"
@@ -339,6 +339,7 @@ onMounted(async () => {
         if (data.phaseTitle !== undefined) task.phaseTitle = data.phaseTitle
         if (data.detail !== undefined) task.detail = data.detail
         if (data.transcodeProgress !== undefined) task.transcodeProgress = data.transcodeProgress
+        if ((data as any).novelVideoId !== undefined) (task as any).novelVideoId = (data as any).novelVideoId
       }
     })
   }
@@ -490,7 +491,32 @@ async function pauseTask(taskId: string) {
 
 async function retryTask(taskId: string) {
   const task = downloadQueue.value.find(t => t.id === taskId)
-  if (task) {
+  if (!task) return
+  const novelVideoId = (task as any).novelVideoId
+  if (task.downloadMode === 'novel' && novelVideoId) {
+    // 入库模式: 重新触发转码
+    try {
+      task.status = 'downloading'
+      task.phase = 'transcoding'
+      task.phaseTitle = '重新转码中...'
+      task.progress = 0
+      task.error = undefined
+      task.transcodeProgress = 0
+      if (window.electronAPI?.video?.retryTranscode) {
+        const result = await window.electronAPI.video.retryTranscode({
+          videoId: novelVideoId,
+          novelProjectPath: novelSettings.value.novelProjectPath
+        })
+        if (result) {
+          task.id = result.id  // 更新为新的轮询 taskId
+        }
+      }
+    } catch (err: any) {
+      task.status = 'error'
+      task.error = err.message || '重试转码失败'
+    }
+  } else {
+    // 本地下载模式: 简单重置
     task.status = 'pending'
     task.progress = 0
     task.error = undefined

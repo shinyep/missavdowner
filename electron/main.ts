@@ -1,4 +1,4 @@
-﻿import { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard, net } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard, net } from 'electron'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { spawn, ChildProcess } from 'node:child_process'
@@ -346,7 +346,8 @@ function setupIPC() {
             phase: progress.phase,
             phaseTitle: progress.phaseTitle,
             detail: progress.detail,
-            transcodeProgress: progress.transcodeProgress
+            transcodeProgress: progress.transcodeProgress,
+            novelVideoId: progress.novelVideoId,
           })
 
           // 下载完成
@@ -403,6 +404,45 @@ function setupIPC() {
 
   // 历史记录
   ipcMain.handle('history:get', async () => {
+
+  // 重试转码 (Novel 入库失败后)
+  ipcMain.handle('video:retryTranscode', async (_, options: { videoId: number; novelProjectPath?: string }) => {
+    try {
+      const result = await callPythonAPI('/api/retry-transcode/' + options.videoId, 'POST', {
+        novelProjectPath: options.novelProjectPath || 'F:\\novel'
+      })
+      const taskId = result.task_id
+
+      const pollProgress = async () => {
+        try {
+          const progress = await callPythonAPI(`/api/progress/${taskId}`)
+          win?.webContents.send('download:progress', {
+            taskId, progress: progress.progress, speed: progress.speed,
+            status: progress.status, phase: progress.phase,
+            phaseTitle: progress.phaseTitle, detail: progress.detail,
+            transcodeProgress: progress.transcodeProgress,
+            novelVideoId: progress.novelVideoId,
+          })
+          if (progress.status === 'completed' || progress.status === 'error') {
+            if (progress.status === 'completed') {
+              win?.webContents.send('download:completed', { taskId, filename: '' })
+            } else {
+              win?.webContents.send('download:error', { taskId, error: progress.error || '转码失败' })
+            }
+            return
+          }
+          setTimeout(pollProgress, 1000)
+        } catch (error) {
+          console.error('Retry poll error:', error)
+        }
+      }
+      pollProgress()
+
+      return { id: taskId, status: 'downloading', progress: 0 }
+    } catch (error: any) {
+      throw new Error(error.message || '重试转码失败')
+    }
+  })
     try {
       const result = await callPythonAPI('/api/history')
       return result.records || []

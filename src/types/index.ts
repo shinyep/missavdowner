@@ -33,6 +33,8 @@ export interface DownloadTask {
   transcodeProgress?: number
   /** 下载模式：local=下载到本地，novel=入库到 novel 项目 */
   downloadMode?: 'local' | 'novel'
+  /** Novel 入库的视频 ID，用于重新转码 */
+  novelVideoId?: number
 }
 
 export interface HistoryRecord {
@@ -98,6 +100,7 @@ export interface ElectronAPI {
     download: (options: { url: string; outputDir: string; downloadMode?: 'local' | 'novel'; novelProjectPath?: string }) => Promise<DownloadTask>
     pauseDownload: (taskId: string) => Promise<void>
     resumeDownload: (taskId: string) => Promise<void>
+    retryTranscode: (options: { videoId: number; novelProjectPath?: string }) => Promise<{ id: string; status: string; progress: number }>
     cancelDownload: (taskId: string) => Promise<void>
   }
   onDownloadProgress: (callback: (data: {

@@ -237,6 +237,7 @@ def get_progress(task_id: str):
         'phaseTitle': task.get('phaseTitle', ''),
         'detail': task.get('detail', ''),
         'transcodeProgress': task.get('transcodeProgress', 0),
+        'novelVideoId': task.get('novel_video_id'),
     })
 
 
@@ -636,6 +637,63 @@ def download_to_novel():
         return jsonify({'error': str(e)}), 500
 
 
+
+@app.route('/api/retry-transcode/<int:video_id>', methods=['POST'])
+def retry_transcode(video_id: int):
+    """重试转码指定的视频"""
+    import subprocess as _sp, time as _time
+    data = request.get_json() or {}
+    novel_project_path = data.get('novelProjectPath', 'F:\\novel')
+    novel_backend = os.path.join(novel_project_path, 'backend')
+    novel_venv_python = os.path.join(novel_backend, 'venv', 'Scripts', 'python.exe')
+    if not os.path.exists(novel_venv_python):
+        return jsonify({'error': f'Python 不存在: {novel_venv_python}'}), 400
+    task_id = str(uuid.uuid4())[:8]
+    download_tasks[task_id] = {
+        'id': task_id, 'status': 'downloading', 'progress': 0, 'speed': '转码中...',
+        'phase': 'transcoding', 'phaseTitle': _phase_title('transcoding'),
+        'detail': f'video_id={video_id}', 'transcodeProgress': 0,
+        'downloadMode': 'novel', 'novel_video_id': video_id,
+    }
+    def retry_thread():
+        try:
+            encode_cmd = [novel_venv_python, 'manage.py', 'process_videos', '--video_id', str(video_id)]
+            print(f"[Retry] 转码: {' '.join(encode_cmd)}")
+            encode_proc = _sp.Popen(encode_cmd, stdout=_sp.DEVNULL, stderr=_sp.PIPE, text=True, cwd=novel_backend, env={**os.environ, 'PYTHONIOENCODING': 'utf-8'})
+            _time.sleep(2)
+            if encode_proc.poll() is not None:
+                _, err = encode_proc.communicate(timeout=5)
+                raise Exception(f"process_videos 启动失败: {err}")
+            poll = ("import os,sys\nos.environ['DJANGO_SETTINGS_MODULE']='novel_project.settings'\n" f"sys.path.insert(0,{repr(novel_backend)})\nimport django\ndjango.setup()\nfrom api.models import GalleryVideo\n" f"v=GalleryVideo.objects.get(id={video_id})\nprint(f'PROGRESS={{v.progress}}')\nprint(f'STATUS={{v.status}}')")
+            prev = 0
+            while encode_proc.poll() is None:
+                try:
+                    pr = _sp.run([novel_venv_python, '-c', poll], capture_output=True, text=True, timeout=5, cwd=novel_backend)
+                    for l in pr.stdout.strip().split('\n'):
+                        if l.startswith('PROGRESS='):
+                            p = int(l.split('=', 1)[1])
+                            if p > prev: prev = p; download_tasks[task_id]['transcodeProgress'] = p
+                        if l.startswith('STATUS='):
+                            s = l.split('=', 1)[1]
+                            if s == 'completed':
+                                download_tasks[task_id]['status'] = 'completed'
+                                download_tasks[task_id]['transcodeProgress'] = 100
+                                download_tasks[task_id]['detail'] = '转码完成'
+                                return
+                            elif s == 'failed': raise Exception('转码失败')
+                except Exception as pe:
+                    if '转码失败' in str(pe): raise
+                    print(f"[Retry] 轮询异常: {pe}")
+                _time.sleep(2)
+            encode_proc.wait(timeout=10)
+            download_tasks[task_id]['status'] = 'completed'
+            download_tasks[task_id]['transcodeProgress'] = 100
+        except Exception as e:
+            download_tasks[task_id]['status'] = 'error'
+            download_tasks[task_id]['error'] = str(e)
+            print(f"[Retry] 失败: {e}")
+    threading.Thread(target=retry_thread, daemon=True).start()
+    return jsonify({'task_id': task_id, 'video_id': video_id, 'status': 'downloading'})
 
 
 if __name__ == '__main__':

@@ -40,6 +40,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     parse: (url: string) => ipcRenderer.invoke('video:parse', url),
     download: (options: { url: string; outputDir: string; maxConcurrent?: number; proxy?: string; autoMerge?: boolean; keepTempFiles?: boolean; downloadMode?: string; novelProjectPath?: string; novelBackendUrl?: string }) => ipcRenderer.invoke('video:download', options),
     pauseDownload: (taskId: string) => ipcRenderer.invoke('download:pause', taskId),
+    retryTranscode: (options: { videoId: number; novelProjectPath?: string }) => ipcRenderer.invoke('video:retryTranscode', options),
   },
 
   // 下载进度监听
