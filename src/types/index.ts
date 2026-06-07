@@ -84,7 +84,8 @@ export interface ElectronAPI {
     fetchImage: (url: string) => Promise<string | null>
   }
   shell: {
-    openPath: (filePath: string) => Promise<void>
+    openPath: (filePath: string) => Promise<string>
+    openFolder: (filePath: string) => Promise<string>
     openExternal: (url: string) => Promise<void>
   }
   window: {

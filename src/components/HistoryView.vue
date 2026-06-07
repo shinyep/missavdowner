@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <div class="flex-1 flex flex-col overflow-hidden bg-surface">
     <div class="flex items-center justify-between px-8 py-4 border-b border-outline-variant/10">
       <h2 class="font-headline text-lg font-bold text-on-surface">下载历史</h2>
@@ -24,7 +24,7 @@
     </div>
 
     <div class="flex-1 overflow-y-auto px-8 py-4">
-      <!-- 绌虹姸鎬?-->
+      <!-- 空状态-->
       <div v-if="historyList.length === 0" class="flex flex-col items-center justify-center h-full text-on-surface-variant">
         <span class="material-symbols-outlined text-5xl mb-3">history</span>
         <p class="text-sm">暂无下载历史</p>
@@ -48,9 +48,9 @@
               <h4 class="text-sm font-medium text-on-surface truncate">{{ item.title }}</h4>
               <div class="flex items-center gap-2 mt-1 text-xs text-on-surface-variant">
                 <span v-if="item.code" class="font-mono">{{ item.code }}</span>
-                <span v-if="item.actresses?.length">路 {{ item.actresses[0] }}</span>
-                <span>路 {{ formatDate(item.downloadedAt) }}</span>
-                <span v-if="item.fileSize">路 {{ item.fileSize }}</span>
+                <span v-if="item.actresses?.length">· {{ item.actresses[0] }}</span>
+                <span>· {{ formatDate(item.downloadedAt) }}</span>
+                <span v-if="item.fileSize">· {{ item.fileSize }}</span>
               </div>
             </div>
             <!-- 操作 -->
@@ -59,6 +59,7 @@
                 class="size-7 flex items-center justify-center rounded hover:bg-surface-variant"
                 @click="openFile(item.outputPath)"
                 title="打开文件"
+                v-if="isRealPath(item.outputPath)"
               >
                 <span class="material-symbols-outlined text-sm">open_in_new</span>
               </button>
@@ -66,6 +67,7 @@
                 class="size-7 flex items-center justify-center rounded hover:bg-surface-variant"
                 @click="openFolder(item.outputPath)"
                 title="打开文件夹"
+                v-if="isRealPath(item.outputPath)"
               >
                 <span class="material-symbols-outlined text-sm">folder_open</span>
               </button>
@@ -147,16 +149,17 @@ async function clearHistory() {
 }
 
 async function openFile(filePath: string) {
-  if (window.electronAPI?.shell?.openPath) {
-    await window.electronAPI.shell.openPath(filePath)
-  }
+  const err = await window.electronAPI?.shell?.openPath(filePath)
+  if (err) console.error('打开文件失败:', err)
 }
 
 async function openFolder(filePath: string) {
-  if (window.electronAPI?.shell?.openPath) {
-    const folderPath = filePath.substring(0, filePath.lastIndexOf('\\'))
-    await window.electronAPI.shell.openPath(folderPath)
-  }
+  const err = await window.electronAPI?.shell?.openFolder(filePath)
+  if (err) console.error('打开文件夹失败:', err)
+}
+
+function isRealPath(path: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(path)
 }
 
 function formatDate(timestamp: number): string {

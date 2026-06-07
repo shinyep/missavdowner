@@ -273,12 +273,16 @@ function setupIPC() {
   })
 
   // Shell 操作
-  ipcMain.handle('shell:openPath', (_, filePath: string) => {
-    shell.openPath(filePath)
+  ipcMain.handle('shell:openPath', async (_, filePath: string) => {
+    return await shell.openPath(filePath)
+  })
+
+  ipcMain.handle('shell:openFolder', (_, filePath: string) => {
+    return shell.openPath(path.dirname(filePath))
   })
 
   ipcMain.handle('shell:openExternal', (_, url: string) => {
-    shell.openExternal(url)
+    return shell.openExternal(url)
   })
 
   // 窗口控制

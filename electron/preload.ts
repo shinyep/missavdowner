@@ -24,6 +24,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Shell 操作
   shell: {
     openPath: (filePath: string) => ipcRenderer.invoke('shell:openPath', filePath),
+    openFolder: (filePath: string) => ipcRenderer.invoke('shell:openFolder', filePath),
     openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url),
   },
 
