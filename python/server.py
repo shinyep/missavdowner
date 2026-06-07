@@ -420,7 +420,15 @@ def download_to_novel():
                     env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}
                 )
 
+                # 检查进程是否立即失败
+                time.sleep(2)
+                if encode_proc.poll() is not None:
+                    _, early_err = encode_proc.communicate(timeout=5)
+                    raise Exception(f"process_videos 启动失败: {early_err}")
+
                 # 轮询数据库进度
+                # 初始进度更新
+                download_tasks[task_id]['detail'] = '转码进程已启动，等待处理...'
                 poll_script = (
                     "import os, sys\n"
                     "os.environ['DJANGO_SETTINGS_MODULE'] = 'novel_project.settings'\n"
@@ -454,8 +462,8 @@ def download_to_novel():
                                         download_tasks[task_id]['detail'] = f'正在优化视频...'
                                     if prog >= 30:
                                         download_tasks[task_id]['detail'] = f'正在生成 HLS 流...'
-                    except Exception:
-                        pass
+                    except Exception as poll_err:
+                        print(f"[Novel] 进度轮询异常: {poll_err}")
                     time.sleep(2)
 
                 encode_stdout, encode_stderr = encode_proc.communicate(timeout=60)
