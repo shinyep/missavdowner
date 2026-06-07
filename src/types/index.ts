@@ -73,6 +73,7 @@ export interface ElectronAPI {
   app: {
     getVersion: () => Promise<string>
     getDefaultDownloadDir: () => Promise<string>
+    fetchImage: (url: string) => Promise<string | null>
   }
   shell: {
     openPath: (filePath: string) => Promise<void>
@@ -107,4 +108,8 @@ declare global {
     electronAPI: ElectronAPI
   }
 }
+
+
+
+
 

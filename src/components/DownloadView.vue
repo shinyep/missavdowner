@@ -271,8 +271,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
-import type { VideoInfo, DownloadTask, AppSettings } from '../types'
+import { ref, computed, onMounted } from 'vue'
+import type { VideoInfo, DownloadTask } from '../types'
 
 const urlInput = ref<HTMLTextAreaElement | null>(null)
 const url = ref('')
@@ -494,3 +494,4 @@ function getStatusText(status: DownloadTask['status']): string {
   return map[status] || status
 }
 </script>
+
