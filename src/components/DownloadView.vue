@@ -287,7 +287,7 @@ const downloadQueue = ref<DownloadTask[]>([])
 const downloadMode = ref<'local' | 'novel'>('local')
 
 // Novel 入库设置
-const novelSettings = ref({ novelProjectPath: '', novelBackendUrl: '' })
+const novelSettings = ref({ novelProjectPath: 'F:\\novel', novelBackendUrl: 'http://127.0.0.1:8002' })
 const hasNovelConfig = computed(() => !!novelSettings.value.novelProjectPath)
 
 onMounted(async () => {
@@ -494,4 +494,5 @@ function getStatusText(status: DownloadTask['status']): string {
   return map[status] || status
 }
 </script>
+
 

@@ -252,66 +252,39 @@ def download_and_import():
 
         # 在后台线程中下载并入库
         def download_and_import_thread():
-            temp_output_path = None
+            output_path = None
             try:
-                # 1. 下载视频到临时目录
-                import tempfile
-                temp_dir = tempfile.mkdtemp(prefix='missav_import_')
-                temp_output_path = os.path.join(temp_dir, filename)
+                import subprocess
+                novel_python = os.path.join(novel_project_path, "backend", "venv", "Scripts", "python.exe")
+                if not os.path.exists(novel_python):
+                    novel_python = "python"
 
-                download_tasks[task_id]['status'] = 'downloading'
-                download_tasks[task_id]['speed'] = '下载中'
+                backend_dir = os.path.join(novel_project_path, "backend")
+                gallery_title = video_info.get("code") or safe_title
+                cover_url = video_info.get("cover", "")
+
+                # 直接下载到 novel 项目的 temp_videos 目录
+                novel_temp_dir = os.path.join(novel_project_path, "img", "temp_videos")
+                os.makedirs(novel_temp_dir, exist_ok=True)
+                dest_filename = "missav_" + safe_title.replace(" ", "_").lower() + ".mp4"
+                output_path = os.path.join(novel_temp_dir, dest_filename)
+
+                download_tasks[task_id]["status"] = "downloading"
+                download_tasks[task_id]["speed"] = "下载中"
 
                 def progress_callback(progress, speed):
-                    # 下载阶段占 0~80%
-                    download_tasks[task_id]['progress'] = progress * 0.8
-                    download_tasks[task_id]['speed'] = speed
+                    download_tasks[task_id]["progress"] = progress * 0.8
+                    download_tasks[task_id]["speed"] = speed
 
-                run_async(downloader.download_video(
-                    video_info['m3u8_url'],
-                    url,
-                    temp_output_path,
-                    progress_callback,
-                    auto_merge=auto_merge,
-                    keep_temp_files=keep_temp
-                ))
+                run_async(downloader.download_video(video_info["m3u8_url"], url, output_path, progress_callback, auto_merge=auto_merge, keep_temp_files=keep_temp))
 
-                download_tasks[task_id]['progress'] = 80
-                download_tasks[task_id]['speed'] = '下载完成，准备入库...'
+                download_tasks[task_id]["progress"] = 80
+                download_tasks[task_id]["speed"] = "下载完成，准备入库..."
+                download_tasks[task_id]["status"] = "merging"
+                download_tasks[task_id]["progress"] = 85
+                download_tasks[task_id]["speed"] = "正在入库到数据库..."
 
-                # 2. 调用 novel 项目的 import_gallery 管理命令入库
-                download_tasks[task_id]['status'] = 'merging'
-                download_tasks[task_id]['progress'] = 85
-                download_tasks[task_id]['speed'] = '正在入库到数据库...'
-
-                import subprocess
-                # 从 novel 项目路径获取 python 解释器 (优先使用 venv)
-                novel_python = os.path.join(novel_project_path, 'backend', 'venv', 'Scripts', 'python.exe')
-                if not os.path.exists(novel_python):
-                    novel_python = 'python'
-
-                backend_dir = os.path.join(novel_project_path, 'backend')
-
-                # 构建 gallery_title: 使用番号或标题
-                gallery_title = video_info.get('code') or safe_title
-
-                # 构建封面 URL
-                cover_url = video_info.get('cover', '')
-
-                # 构建视频路径列表
-                video_paths = [temp_output_path]
-
-                # 使用 import_gallery 命令的简化模式：
-                # 将视频文件复制到 novel 项目的 temp_videos 目录，然后通过 manage.py 调用
-                novel_temp_dir = os.path.join(novel_project_path, 'img', 'temp_videos')
-                os.makedirs(novel_temp_dir, exist_ok=True)
-
-                # 将视频复制到 novel 项目的 temp 目录
-                dest_filename = f"missav_{video_info.get('code', '').replace('-', '_').lower() or safe_title.replace(' ', '_').lower()}.mp4"
-                dest_path = os.path.join(novel_temp_dir, dest_filename)
-
-                print(f"[入库] 复制视频: {temp_output_path} -> {dest_path}")
-                shutil.copy2(temp_output_path, dest_path)
+                dest_path = output_path
 
                 download_tasks[task_id]['progress'] = 90
 
@@ -416,7 +389,7 @@ print(f"GALLERY_ID={{gallery.id}}")
                     'tags': video_info.get('tags', []),
                     'code': video_info.get('code', ''),
                     'outputPath': f"novel://gallery/{gallery_id}" if gallery_id else '',
-                    'fileSize': f"{os.path.getsize(temp_output_path) / (1024*1024):.1f} MB" if os.path.exists(temp_output_path) else '',
+                    'fileSize': f"{os.path.getsize(output_path) / (1024*1024):.1f} MB" if os.path.exists(output_path) else '',
                     'downloadedAt': int(datetime.now().timestamp() * 1000),
                     'downloadMode': 'novel'
                 })
@@ -428,11 +401,7 @@ print(f"GALLERY_ID={{gallery.id}}")
                 print(f"[入库] 失败: {e}")
             finally:
                 # 清理临时文件
-                if temp_output_path and os.path.exists(os.path.dirname(temp_output_path)):
-                    try:
-                        shutil.rmtree(os.path.dirname(temp_output_path), ignore_errors=True)
-                    except:
-                        pass
+                pass  # 入库模式下文件已直接保存在 novel 项目目录，无需清理
 
         thread = threading.Thread(target=download_and_import_thread, daemon=True)
         thread.start()
@@ -520,6 +489,8 @@ if __name__ == '__main__':
 
     print(f"Starting server on port {args.port}")
     app.run(host='127.0.0.1', port=args.port, debug=False)
+
+
 
 
 
