@@ -1,6 +1,6 @@
 {
   "name": "missav-downloader",
-  "version": "1.3.5",
+  "version": "1.3.8",
   "private": true,
   "description": "MissAV 瑙嗛涓嬭浇鍣?- Windows 11 鍘熺敓搴旂敤",
   "main": "dist-electron/main.js",
