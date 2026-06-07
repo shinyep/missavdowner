@@ -307,13 +307,30 @@ function setupIPC() {
       const pollProgress = async () => {
         try {
           const progress = await callPythonAPI(`/api/progress/${taskId}`)
+
+          // 发送进度更新
           win?.webContents.send('download:progress', {
             taskId,
             progress: progress.progress,
-            speed: progress.speed
+            speed: progress.speed,
+            status: progress.status
           })
 
-          if (progress.status === 'completed' || progress.status === 'error') {
+          // 下载完成
+          if (progress.status === 'completed') {
+            win?.webContents.send('download:completed', {
+              taskId,
+              filename: result.filename
+            })
+            return
+          }
+
+          // 下载失败
+          if (progress.status === 'error') {
+            win?.webContents.send('download:error', {
+              taskId,
+              error: progress.error || '下载失败'
+            })
             return
           }
 

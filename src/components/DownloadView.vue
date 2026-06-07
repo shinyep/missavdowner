@@ -263,6 +263,8 @@ const outputDir = ref('')
 const downloadQueue = ref<DownloadTask[]>([])
 
 let unsubscribeProgress: (() => void) | null = null
+let unsubscribeCompleted: (() => void) | null = null
+let unsubscribeError: (() => void) | null = null
 
 onMounted(async () => {
   // 获取默认下载目录
@@ -277,18 +279,42 @@ onMounted(async () => {
       if (task) {
         task.progress = data.progress
         task.speed = data.speed
-        if (data.progress >= 100) {
+        if (data.status === 'completed') {
           task.status = 'completed'
         }
+      }
+    })
+  }
+
+  // 监听下载完成
+  if (window.electronAPI?.onDownloadCompleted) {
+    unsubscribeCompleted = window.electronAPI.onDownloadCompleted((data) => {
+      const task = downloadQueue.value.find(t => t.id === data.taskId)
+      if (task) {
+        task.status = 'completed'
+        task.progress = 100
+      }
+      // 触发历史记录刷新
+      window.dispatchEvent(new CustomEvent('history-updated'))
+    })
+  }
+
+  // 监听下载错误
+  if (window.electronAPI?.onDownloadError) {
+    unsubscribeError = window.electronAPI.onDownloadError((data) => {
+      const task = downloadQueue.value.find(t => t.id === data.taskId)
+      if (task) {
+        task.status = 'error'
+        task.error = data.error
       }
     })
   }
 })
 
 onUnmounted(() => {
-  if (unsubscribeProgress) {
-    unsubscribeProgress()
-  }
+  if (unsubscribeProgress) unsubscribeProgress()
+  if (unsubscribeCompleted) unsubscribeCompleted()
+  if (unsubscribeError) unsubscribeError()
 })
 
 async function pasteUrl() {

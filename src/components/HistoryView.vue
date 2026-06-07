@@ -103,6 +103,15 @@ const filteredHistory = computed(() => {
 
 onMounted(async () => {
   await loadHistory()
+
+  // 监听历史记录更新事件
+  window.addEventListener('history-updated', () => {
+    loadHistory()
+  })
+})
+
+onUnmounted(() => {
+  window.removeEventListener('history-updated', () => {})
 })
 
 async function loadHistory() {

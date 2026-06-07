@@ -50,6 +50,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }
   },
 
+  // 下载完成监听
+  onDownloadCompleted: (callback: (data: any) => void) => {
+    const handler = (_: any, data: any) => callback(data)
+    ipcRenderer.on('download:completed', handler)
+    return () => {
+      ipcRenderer.off('download:completed', handler)
+    }
+  },
+
+  // 下载错误监听
+  onDownloadError: (callback: (data: any) => void) => {
+    const handler = (_: any, data: any) => callback(data)
+    ipcRenderer.on('download:error', handler)
+    return () => {
+      ipcRenderer.off('download:error', handler)
+    }
+  },
+
   // 历史记录
   history: {
     get: () => ipcRenderer.invoke('history:get'),

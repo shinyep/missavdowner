@@ -76,7 +76,9 @@ export interface ElectronAPI {
     resumeDownload: (taskId: string) => Promise<void>
     cancelDownload: (taskId: string) => Promise<void>
   }
-  onDownloadProgress: (callback: (data: { taskId: string; progress: number; speed: string }) => void) => () => void
+  onDownloadProgress: (callback: (data: { taskId: string; progress: number; speed: string; status?: string }) => void) => () => void
+  onDownloadCompleted: (callback: (data: { taskId: string; filename: string }) => void) => () => void
+  onDownloadError: (callback: (data: { taskId: string; error: string }) => void) => () => void
   history: {
     get: () => Promise<HistoryRecord[]>
     add: (record: Omit<HistoryRecord, 'id' | 'downloadedAt'>) => Promise<void>
