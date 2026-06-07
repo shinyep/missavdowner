@@ -444,6 +444,7 @@ def download_to_novel():
                 )
 
                 prev_progress = 0
+                transcode_ok = True
                 while encode_proc.poll() is None:
                     try:
                         poll_result = _sp.run(
@@ -464,9 +465,29 @@ def download_to_novel():
                                         download_tasks[task_id]['detail'] = f'正在优化视频...'
                                     if prog >= 30:
                                         download_tasks[task_id]['detail'] = f'正在生成 HLS 流...'
+                            if line.startswith('STATUS='):
+                                status = line.split('=', 1)[1]
+                                if status == 'completed':
+                                    download_tasks[task_id]['transcodeProgress'] = 100
+                                    download_tasks[task_id]['detail'] = '转码完成'
+                                    print(f"[Novel] 转码完成! video_id={video_id}")
+                                    # 等待进程退出
+                                    encode_proc.wait(timeout=10)
+                                    break
+                                elif status == 'failed':
+                                    download_tasks[task_id]['detail'] = '转码失败，请检查视频文件'
+                                    print(f"[Novel] 转码失败! video_id={video_id}")
+                                    encode_proc.kill()
+                                    transcode_ok = False
+                                    break
+                                elif status == 'processing' and prev_progress == 0:
+                                    download_tasks[task_id]['detail'] = '正在转码...'
                     except Exception as poll_err:
                         print(f"[Novel] 进度轮询异常: {poll_err}")
                     time.sleep(2)
+
+                if not transcode_ok:
+                    raise Exception(f"转码失败 (video_id={video_id})")
 
                 encode_stdout, encode_stderr = encode_proc.communicate(timeout=60)
 
