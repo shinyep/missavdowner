@@ -308,9 +308,80 @@ function setupIPC() {
     }
   })
 
-  // 视频下载
-  ipcMain.handle('video:download', async (_, options: { url: string; outputDir: string; maxConcurrent?: number; proxy?: string; autoMerge?: boolean; keepTempFiles?: boolean }) => {
+  // 视频下载（支持本地下载 / 入库到 novel 项目）
+  ipcMain.handle('video:download', async (_, options: {
+    url: string; outputDir: string; maxConcurrent?: number; proxy?: string;
+    autoMerge?: boolean; keepTempFiles?: boolean;
+    downloadMode?: 'local' | 'novel'; novelProjectPath?: string; novelBackendUrl?: string
+  }) => {
     try {
+      const downloadMode = options.downloadMode || 'local'
+
+      // 入库模式：下载完成后调用入库 API
+      if (downloadMode === 'novel') {
+        const result = await callPythonAPI('/api/download-and-import', 'POST', {
+          url: options.url,
+          maxConcurrent: options.maxConcurrent || 16,
+          proxy: options.proxy || '',
+          autoMerge: options.autoMerge !== false,
+          keepTempFiles: options.keepTempFiles || false,
+          novelProjectPath: options.novelProjectPath || '',
+          novelBackendUrl: options.novelBackendUrl || 'http://127.0.0.1:8002'
+        })
+        const taskId = result.task_id
+
+        // 轮询进度
+        const pollProgress = async () => {
+          try {
+            const progress = await callPythonAPI(`/api/progress/${taskId}`)
+
+            win?.webContents.send('download:progress', {
+              taskId,
+              progress: progress.progress,
+              speed: progress.speed,
+              status: progress.status
+            })
+
+            if (progress.status === 'completed') {
+              win?.webContents.send('download:completed', {
+                taskId,
+                filename: result.filename
+              })
+              return
+            }
+
+            if (progress.status === 'error') {
+              win?.webContents.send('download:error', {
+                taskId,
+                error: progress.error || '入库失败'
+              })
+              return
+            }
+
+            setTimeout(pollProgress, 1500)
+          } catch (error) {
+            console.error('Progress poll error:', error)
+          }
+        }
+
+        pollProgress()
+
+        return {
+          id: taskId,
+          filename: result.filename || '入库处理中...',
+          title: '',
+          cover: '',
+          status: 'downloading',
+          progress: 0,
+          speed: '等待中',
+          size: '',
+          outputPath: '',
+          createdAt: Date.now(),
+          downloadMode: 'novel'
+        }
+      }
+
+      // 本地下载模式
       const result = await callPythonAPI('/api/download', 'POST', {
         url: options.url,
         outputDir: options.outputDir,
@@ -321,12 +392,10 @@ function setupIPC() {
       })
       const taskId = result.task_id
 
-      // 开始轮询进度
       const pollProgress = async () => {
         try {
           const progress = await callPythonAPI(`/api/progress/${taskId}`)
 
-          // 发送进度更新
           win?.webContents.send('download:progress', {
             taskId,
             progress: progress.progress,
@@ -334,7 +403,6 @@ function setupIPC() {
             status: progress.status
           })
 
-          // 下载完成
           if (progress.status === 'completed') {
             win?.webContents.send('download:completed', {
               taskId,
@@ -343,7 +411,6 @@ function setupIPC() {
             return
           }
 
-          // 下载失败
           if (progress.status === 'error') {
             win?.webContents.send('download:error', {
               taskId,
@@ -455,3 +522,4 @@ app.on('activate', () => {
 app.on('before-quit', () => {
   stopPythonBackend()
 })
+

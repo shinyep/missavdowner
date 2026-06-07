@@ -88,6 +88,46 @@
           </div>
         </section>
 
+        <!-- Novel 项目入库设置 -->
+        <section class="flex flex-col gap-4">
+          <h3 class="font-headline text-sm font-bold text-on-surface flex items-center gap-2">
+            <span class="material-symbols-outlined text-primary text-base">database</span>
+            Novel 项目入库
+          </h3>
+          <p class="text-xs text-on-surface-variant">配置后可将视频直接入库到 novel 项目的数据库（需要 novel 项目后端正在运行）</p>
+
+          <!-- Novel 项目路径 -->
+          <div class="flex flex-col gap-1.5">
+            <label class="text-xs font-medium text-on-surface-variant">Novel 项目路径</label>
+            <div class="flex gap-2">
+              <input
+                v-model="settings.novelProjectPath"
+                type="text"
+                class="flex-1 h-9 bg-surface-container-highest rounded-md px-3 text-sm text-on-surface border border-outline-variant/10 focus:outline-none focus:ring-1 focus:ring-primary"
+                placeholder="例如: F:\novel"
+              />
+              <button
+                class="flex items-center gap-1 px-3 h-9 bg-surface-container-highest text-on-surface rounded-md text-xs font-medium hover:bg-surface-variant transition-colors border border-outline-variant/10"
+                @click="selectNovelProjectPath"
+              >
+                <span class="material-symbols-outlined text-sm">folder</span>
+                <span>浏览</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Novel 后端地址 -->
+          <div class="flex flex-col gap-1.5">
+            <label class="text-xs font-medium text-on-surface-variant">Novel 后端地址</label>
+            <input
+              v-model="settings.novelBackendUrl"
+              type="text"
+              class="h-9 bg-surface-container-highest rounded-md px-3 text-sm text-on-surface placeholder:text-outline-variant border border-outline-variant/10 focus:outline-none focus:ring-1 focus:ring-primary"
+              placeholder="例如: http://127.0.0.1:8002"
+            />
+          </div>
+        </section>
+
         <!-- 网络设置 -->
         <section class="flex flex-col gap-4">
           <h3 class="font-headline text-sm font-bold text-on-surface flex items-center gap-2">
@@ -170,7 +210,9 @@ const settings = ref<AppSettings>({
   maxConcurrent: 16,
   autoMerge: true,
   keepTempFiles: false,
-  proxy: ''
+  proxy: '',
+  novelProjectPath: 'F:\\novel',
+  novelBackendUrl: 'http://127.0.0.1:8002'
 })
 
 onMounted(async () => {
@@ -198,6 +240,15 @@ async function selectDownloadDir() {
   }
 }
 
+async function selectNovelProjectPath() {
+  if (window.electronAPI?.dialog?.selectFolder) {
+    const dir = await window.electronAPI.dialog.selectFolder()
+    if (dir) {
+      settings.value.novelProjectPath = dir
+    }
+  }
+}
+
 async function saveSettings() {
   // 保存设置到本地存储
   localStorage.setItem('app-settings', JSON.stringify(settings.value))
@@ -210,7 +261,9 @@ function resetSettings() {
     maxConcurrent: 16,
     autoMerge: true,
     keepTempFiles: false,
-    proxy: ''
+    proxy: '',
+    novelProjectPath: 'F:\\novel',
+    novelBackendUrl: 'http://127.0.0.1:8002'
   }
 }
 </script>

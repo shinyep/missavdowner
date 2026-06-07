@@ -49,6 +49,8 @@ export interface AppSettings {
   proxy: string
   /** novel 项目路径，用于入库功能 */
   novelProjectPath: string
+  /** novel 后端地址 */
+  novelBackendUrl: string
 }
 
 /** 入库到 novel 项目的结果 */
@@ -105,3 +107,4 @@ declare global {
     electronAPI: ElectronAPI
   }
 }
+

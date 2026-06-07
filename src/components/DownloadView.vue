@@ -48,6 +48,12 @@
             <span class="text-sm text-error">{{ errorMsg }}</span>
           </div>
 
+          <!-- 成功入库提示 -->
+          <div v-if="importSuccessMsg" class="flex items-center gap-2 p-3 bg-primary/10 border border-primary/20 rounded-md">
+            <span class="material-symbols-outlined text-primary text-base">check_circle</span>
+            <span class="text-sm text-primary">{{ importSuccessMsg }}</span>
+          </div>
+
           <!-- 解析结果预览 -->
           <div v-if="videoInfo" class="mt-2 flex flex-col gap-4">
             <h3 class="font-headline text-sm font-bold text-on-surface border-b border-outline-variant/20 pb-2">解析结果预览</h3>
@@ -85,23 +91,54 @@
                     <span class="material-symbols-outlined text-xs">calendar_today</span>
                     <span>{{ videoInfo.release_date }}</span>
                   </div>
-                </div>
-                <!-- 标签 -->
-                <div v-if="videoInfo.tags?.length" class="flex flex-wrap gap-1 mt-1">
-                  <span
-                    v-for="tag in videoInfo.tags.slice(0, 5)"
-                    :key="tag"
-                    class="px-1.5 py-0.5 bg-primary-container/30 text-primary-dim text-xs rounded"
-                  >
-                    {{ tag }}
-                  </span>
+                  <div v-if="videoInfo.tags?.length" class="flex flex-wrap gap-1 mt-1">
+                    <span v-for="tag in videoInfo.tags.slice(0, 5)" :key="tag" class="px-1.5 py-0.5 bg-surface-container-highest rounded-sm text-[10px]">
+                      {{ tag }}
+                    </span>
+                    <span v-if="videoInfo.tags.length > 5" class="text-[10px] text-outline-variant">+{{ videoInfo.tags.length - 5 }}</span>
+                  </div>
                 </div>
               </div>
+            </div>
+
+            <!-- 下载模式选择 -->
+            <div class="flex flex-col gap-2">
+              <label class="text-xs font-medium text-on-surface-variant">下载模式</label>
+              <div class="flex gap-2">
+                <button
+                  class="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-md text-sm font-medium transition-all border-2"
+                  :class="downloadMode === 'local'
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-outline-variant/20 bg-surface-container-highest text-on-surface-variant hover:border-outline-variant/40'"
+                  @click="downloadMode = 'local'"
+                >
+                  <span class="material-symbols-outlined text-base">folder</span>
+                  <span>下载到本地</span>
+                </button>
+                <button
+                  class="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-md text-sm font-medium transition-all border-2"
+                  :class="downloadMode === 'novel'
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-outline-variant/20 bg-surface-container-highest text-on-surface-variant hover:border-outline-variant/40'"
+                  :disabled="!hasNovelConfig"
+                  @click="downloadMode = 'novel'"
+                >
+                  <span class="material-symbols-outlined text-base">database</span>
+                  <span>入库到 Novel</span>
+                </button>
+              </div>
+              <p v-if="downloadMode === 'novel' && hasNovelConfig" class="text-xs text-on-surface-variant">
+                视频将下载后自动入库到 <span class="text-primary font-medium">{{ novelSettings.novelProjectPath }}</span> 的数据库
+              </p>
+              <p v-if="downloadMode === 'novel' && !hasNovelConfig" class="text-xs text-error">
+                请先在「设置」页面配置 Novel 项目路径
+              </p>
             </div>
 
             <!-- 下载按钮 -->
             <div class="flex gap-3">
               <button
+                v-if="downloadMode === 'local'"
                 class="flex items-center gap-2 px-4 py-2 bg-surface-container-highest text-on-surface rounded-md text-sm hover:bg-surface-variant transition-colors border border-outline-variant/10"
                 @click="selectOutputDir"
               >
@@ -110,88 +147,27 @@
               </button>
               <button
                 class="flex-1 flex items-center justify-center gap-2 gradient-btn rounded-md h-10 text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
-                :disabled="isDownloading"
+                :disabled="isDownloading || (downloadMode === 'local' && !outputDir) || (downloadMode === 'novel' && !hasNovelConfig)"
                 @click="startDownload"
               >
-                <span class="material-symbols-outlined text-base">download</span>
-                <span>{{ isDownloading ? '下载中...' : '开始下载' }}</span>
+                <span v-if="isDownloading" class="material-symbols-outlined text-base animate-spin">sync</span>
+                <span v-else class="material-symbols-outlined text-base">{{ downloadMode === 'novel' ? 'database' : 'download' }}</span>
+                <span>{{ isDownloading ? '处理中...' : (downloadMode === 'novel' ? '下载并入库' : '开始下载') }}</span>
               </button>
             </div>
           </div>
 
-          <!-- 下载队列 -->
-          <div v-if="downloadQueue.length > 0" class="mt-2">
-            <h3 class="font-headline text-sm font-bold text-on-surface border-b border-outline-variant/20 pb-2 mb-3">下载队列</h3>
-            <div class="flex flex-col gap-2">
-              <div
-                v-for="task in downloadQueue"
-                :key="task.id"
-                class="bg-surface-container-low rounded-md p-3 border border-outline-variant/10"
-              >
-                <div class="flex items-center justify-between mb-2">
-                  <span class="text-sm text-on-surface truncate flex-1 mr-2">{{ task.filename }}</span>
-                  <div class="flex items-center gap-2">
-                    <span
-                      class="text-xs px-2 py-0.5 rounded"
-                      :class="{
-                        'bg-primary-container/30 text-primary-dim': task.status === 'downloading',
-                        'bg-secondary-container/30 text-secondary': task.status === 'merging',
-                        'bg-tertiary-container/30 text-tertiary': task.status === 'completed',
-                        'bg-error-container/30 text-error': task.status === 'error',
-                        'bg-surface-variant text-on-surface-variant': task.status === 'paused',
-                      }"
-                    >
-                      {{ getStatusText(task.status) }}
-                    </span>
-                    <!-- 操作按钮 -->
-                    <button
-                      v-if="task.status === 'downloading'"
-                      class="size-6 flex items-center justify-center rounded hover:bg-surface-variant"
-                      @click="pauseTask(task.id)"
-                      title="暂停"
-                    >
-                      <span class="material-symbols-outlined text-sm">pause</span>
-                    </button>
-                    <button
-                      v-if="task.status === 'completed'"
-                      class="size-6 flex items-center justify-center rounded hover:bg-surface-variant"
-                      @click="openFile(task.outputPath)"
-                      title="打开文件"
-                    >
-                      <span class="material-symbols-outlined text-sm">open_in_new</span>
-                    </button>
-                    <button
-                      v-if="task.status === 'error'"
-                      class="size-6 flex items-center justify-center rounded hover:bg-surface-variant"
-                      @click="retryTask(task.id)"
-                      title="重试"
-                    >
-                      <span class="material-symbols-outlined text-sm">refresh</span>
-                    </button>
-                    <button
-                      class="size-6 flex items-center justify-center rounded hover:bg-error-container text-on-surface-variant hover:text-error"
-                      @click="removeTask(task.id)"
-                      title="移除"
-                    >
-                      <span class="material-symbols-outlined text-sm">close</span>
-                    </button>
-                  </div>
-                </div>
-                <!-- 进度条 -->
-                <div v-if="task.status === 'downloading' || task.status === 'merging'" class="flex items-center gap-3">
-                  <div class="flex-1 h-1.5 bg-surface-variant rounded-full overflow-hidden">
-                    <div
-                      class="h-full bg-primary rounded-full transition-all"
-                      :style="{ width: `${task.progress}%` }"
-                    ></div>
-                  </div>
-                  <span class="text-xs text-on-surface-variant whitespace-nowrap">{{ task.progress }}%</span>
-                  <span class="text-xs text-on-surface-variant whitespace-nowrap">{{ task.speed }}</span>
-                </div>
-                <!-- 错误信息 -->
-                <div v-if="task.status === 'error' && task.error" class="mt-1">
-                  <span class="text-xs text-error">{{ task.error }}</span>
-                </div>
+          <!-- Quick Guide -->
+          <div v-if="!videoInfo" class="mt-2 p-4 bg-surface-container-low rounded-md border border-outline-variant/10">
+            <h4 class="text-xs font-semibold text-on-surface-variant mb-3">使用步骤</h4>
+            <div class="flex flex-col gap-2.5 text-xs text-on-surface-variant">
+              <div class="flex items-start gap-2">
+                <span class="material-symbols-outlined text-primary text-sm mt-0.5">looks_3</span>
+                <span>解析完成后选择「下载到本地」或「入库到 Novel」</span>
+              </div>
+              <div class="flex items-start gap-2">
+                <span class="material-symbols-outlined text-primary text-sm mt-0.5">looks_4</span>
+                <span>选择保存位置后开始下载</span>
               </div>
             </div>
           </div>
@@ -199,47 +175,93 @@
       </div>
     </section>
 
-    <!-- Right Panel - Tips -->
+    <!-- Right Panel - Download Queue -->
     <section class="w-[35%] flex flex-col bg-surface-container-low border-l border-outline-variant/10">
-      <div class="flex-1 overflow-y-auto px-6 py-6">
-        <div class="flex flex-col gap-4">
-          <h3 class="font-headline text-sm font-bold text-on-surface">使用说明</h3>
-          <div class="flex flex-col gap-3 text-xs text-on-surface-variant leading-relaxed">
-            <div class="flex items-start gap-2">
-              <span class="material-symbols-outlined text-primary text-sm mt-0.5">looks_one</span>
-              <span>复制 missav.ws 视频页面链接</span>
-            </div>
-            <div class="flex items-start gap-2">
-              <span class="material-symbols-outlined text-primary text-sm mt-0.5">looks_two</span>
-              <span>粘贴到左侧输入框</span>
-            </div>
-            <div class="flex items-start gap-2">
-              <span class="material-symbols-outlined text-primary text-sm mt-0.5">looks_3</span>
-              <span>点击"解析视频"按钮</span>
-            </div>
-            <div class="flex items-start gap-2">
-              <span class="material-symbols-outlined text-primary text-sm mt-0.5">looks_4</span>
-              <span>选择保存位置后开始下载</span>
-            </div>
-          </div>
-
-          <div class="h-px bg-outline-variant/20 my-2"></div>
-
-          <h3 class="font-headline text-sm font-bold text-on-surface">支持格式</h3>
-          <div class="flex flex-wrap gap-2">
-            <span class="px-2 py-1 bg-surface-variant text-on-surface-variant text-xs rounded">m3u8</span>
-            <span class="px-2 py-1 bg-surface-variant text-on-surface-variant text-xs rounded">mp4</span>
-            <span class="px-2 py-1 bg-surface-variant text-on-surface-variant text-xs rounded">ts</span>
-          </div>
-
-          <div class="h-px bg-outline-variant/20 my-2"></div>
-
-          <div class="bg-tertiary-container/30 rounded-md p-3">
-            <div class="flex items-start gap-2">
-              <span class="material-symbols-outlined text-tertiary text-sm mt-0.5">info</span>
-              <div class="text-xs text-on-surface-variant leading-relaxed">
-                <p>本工具仅供个人学习使用，请勿用于商业用途。下载的内容版权归原作者所有。</p>
+      <div class="px-5 py-4 border-b border-outline-variant/10">
+        <h3 class="font-headline text-sm font-bold text-on-surface">下载队列</h3>
+      </div>
+      <div class="flex-1 overflow-y-auto px-5 py-4">
+        <div v-if="downloadQueue.length === 0" class="flex flex-col items-center justify-center h-full text-on-surface-variant">
+          <span class="material-symbols-outlined text-4xl mb-2 opacity-40">queue</span>
+          <p class="text-sm">暂无下载任务</p>
+        </div>
+        <div v-else class="flex flex-col gap-3">
+          <div
+            v-for="task in downloadQueue"
+            :key="task.id"
+            class="p-3 bg-surface rounded-md border border-outline-variant/10 flex flex-col gap-2"
+          >
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-medium text-on-surface truncate flex-1 mr-2">{{ task.filename }}</span>
+              <div class="flex items-center gap-1">
+                <span
+                  class="text-[10px] px-1.5 py-0.5 rounded-sm font-medium"
+                  :class="{
+                    'bg-primary/10 text-primary': task.status === 'downloading',
+                    'bg-success/10 text-success': task.status === 'completed',
+                    'bg-error/10 text-error': task.status === 'error',
+                    'bg-surface-variant text-on-surface-variant': task.status === 'paused' || task.status === 'pending'
+                  }"
+                >
+                  {{ getStatusText(task.status) }}
+                </span>
+                <span v-if="task.downloadMode === 'novel'" class="text-[10px] px-1.5 py-0.5 rounded-sm bg-primary/10 text-primary font-medium">
+                  入库
+                </span>
               </div>
+            </div>
+
+            <!-- Progress Bar -->
+            <div v-if="task.status === 'downloading'" class="flex flex-col gap-1">
+              <div class="w-full h-1.5 bg-surface-variant rounded-full overflow-hidden">
+                <div
+                  class="h-full bg-primary rounded-full transition-all duration-300"
+                  :style="{ width: task.progress + '%' }"
+                ></div>
+              </div>
+              <div class="flex justify-between text-[10px] text-on-surface-variant">
+                <span>{{ task.progress.toFixed(1) }}%</span>
+                <span>{{ task.speed }}</span>
+              </div>
+            </div>
+
+            <!-- Error -->
+            <div v-if="task.status === 'error' && task.error" class="text-[10px] text-error">
+              {{ task.error }}
+            </div>
+
+            <!-- Actions -->
+            <div class="flex gap-1.5">
+              <button
+                v-if="task.status === 'completed'"
+                class="flex items-center gap-1 px-2 py-1 bg-surface-container-highest text-on-surface-variant rounded-sm text-[10px] hover:bg-surface-variant transition-colors"
+                @click="openFile(task.outputPath)"
+              >
+                <span class="material-symbols-outlined text-xs">folder_open</span>
+                打开文件
+              </button>
+              <button
+                v-if="task.status === 'error'"
+                class="flex items-center gap-1 px-2 py-1 bg-surface-container-highest text-on-surface-variant rounded-sm text-[10px] hover:bg-surface-variant transition-colors"
+                @click="retryTask(task.id)"
+              >
+                <span class="material-symbols-outlined text-xs">refresh</span>
+                重试
+              </button>
+              <button
+                v-if="task.status === 'downloading'"
+                class="flex items-center gap-1 px-2 py-1 bg-surface-container-highest text-on-surface-variant rounded-sm text-[10px] hover:bg-surface-variant transition-colors"
+                @click="pauseTask(task.id)"
+              >
+                <span class="material-symbols-outlined text-xs">pause</span>
+                暂停
+              </button>
+              <button
+                class="flex items-center gap-1 px-2 py-1 bg-surface-container-highest text-on-surface-variant rounded-sm text-[10px] hover:bg-surface-variant transition-colors ml-auto"
+                @click="removeTask(task.id)"
+              >
+                <span class="material-symbols-outlined text-xs">close</span>
+              </button>
             </div>
           </div>
         </div>
@@ -249,24 +271,36 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
-import type { VideoInfo, DownloadTask } from '../types'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
+import type { VideoInfo, DownloadTask, AppSettings } from '../types'
 
-const urlInput = ref<HTMLTextAreaElement>()
+const urlInput = ref<HTMLTextAreaElement | null>(null)
 const url = ref('')
 const isParsing = ref(false)
 const isDownloading = ref(false)
 const errorMsg = ref('')
+const importSuccessMsg = ref('')
 const videoInfo = ref<VideoInfo | null>(null)
 const coverImage = ref<string | null>(null)
 const outputDir = ref('')
 const downloadQueue = ref<DownloadTask[]>([])
+const downloadMode = ref<'local' | 'novel'>('local')
 
-let unsubscribeProgress: (() => void) | null = null
-let unsubscribeCompleted: (() => void) | null = null
-let unsubscribeError: (() => void) | null = null
+// Novel 入库设置
+const novelSettings = ref({ novelProjectPath: '', novelBackendUrl: '' })
+const hasNovelConfig = computed(() => !!novelSettings.value.novelProjectPath)
 
 onMounted(async () => {
+  // 加载 novel 设置
+  const saved = localStorage.getItem('app-settings')
+  if (saved) {
+    try {
+      const parsed = JSON.parse(saved)
+      novelSettings.value.novelProjectPath = parsed.novelProjectPath || ''
+      novelSettings.value.novelBackendUrl = parsed.novelBackendUrl || ''
+    } catch {}
+  }
+
   // 获取默认下载目录
   if (window.electronAPI?.app?.getDefaultDownloadDir) {
     outputDir.value = await window.electronAPI.app.getDefaultDownloadDir()
@@ -274,34 +308,28 @@ onMounted(async () => {
 
   // 监听下载进度
   if (window.electronAPI?.onDownloadProgress) {
-    unsubscribeProgress = window.electronAPI.onDownloadProgress((data) => {
+    window.electronAPI.onDownloadProgress((data) => {
       const task = downloadQueue.value.find(t => t.id === data.taskId)
       if (task) {
         task.progress = data.progress
         task.speed = data.speed
-        if (data.status === 'completed') {
-          task.status = 'completed'
-        }
+        if (data.status) task.status = data.status as DownloadTask['status']
       }
     })
   }
 
-  // 监听下载完成
   if (window.electronAPI?.onDownloadCompleted) {
-    unsubscribeCompleted = window.electronAPI.onDownloadCompleted((data) => {
+    window.electronAPI.onDownloadCompleted((data) => {
       const task = downloadQueue.value.find(t => t.id === data.taskId)
       if (task) {
         task.status = 'completed'
         task.progress = 100
       }
-      // 触发历史记录刷新
-      window.dispatchEvent(new CustomEvent('history-updated'))
     })
   }
 
-  // 监听下载错误
   if (window.electronAPI?.onDownloadError) {
-    unsubscribeError = window.electronAPI.onDownloadError((data) => {
+    window.electronAPI.onDownloadError((data) => {
       const task = downloadQueue.value.find(t => t.id === data.taskId)
       if (task) {
         task.status = 'error'
@@ -309,12 +337,6 @@ onMounted(async () => {
       }
     })
   }
-})
-
-onUnmounted(() => {
-  if (unsubscribeProgress) unsubscribeProgress()
-  if (unsubscribeCompleted) unsubscribeCompleted()
-  if (unsubscribeError) unsubscribeError()
 })
 
 async function pasteUrl() {
@@ -327,6 +349,7 @@ async function parseVideo() {
   if (!url.value.trim() || isParsing.value) return
 
   errorMsg.value = ''
+  importSuccessMsg.value = ''
   videoInfo.value = null
   coverImage.value = null
   isParsing.value = true
@@ -368,7 +391,6 @@ async function loadCoverImage(imageUrl: string) {
         coverImage.value = dataUrl
       }
     } else {
-      // 开发模式直接使用 URL
       coverImage.value = imageUrl
     }
   } catch (error) {
@@ -390,6 +412,7 @@ async function startDownload() {
 
   isDownloading.value = true
   errorMsg.value = ''
+  importSuccessMsg.value = ''
 
   try {
     if (window.electronAPI?.video?.download) {
@@ -408,16 +431,23 @@ async function startDownload() {
 
       const task = await window.electronAPI.video.download({
         url: url.value.trim(),
-        outputDir: outputDir.value,
+        outputDir: downloadMode.value === 'local' ? outputDir.value : '',
         maxConcurrent: settings.maxConcurrent,
         proxy: settings.proxy,
         autoMerge: settings.autoMerge,
-        keepTempFiles: settings.keepTempFiles
-      })
-      downloadQueue.value.unshift(task)
+        keepTempFiles: settings.keepTempFiles,
+        downloadMode: downloadMode.value,
+        novelProjectPath: downloadMode.value === 'novel' ? novelSettings.value.novelProjectPath : undefined,
+        novelBackendUrl: downloadMode.value === 'novel' ? novelSettings.value.novelBackendUrl : undefined
+      } as any)
+
+      if (task) {
+        task.downloadMode = downloadMode.value
+        downloadQueue.value.unshift(task)
+      }
     }
   } catch (err: any) {
-    errorMsg.value = err.message || '下载失败'
+    errorMsg.value = err.message || '处理失败'
   } finally {
     isDownloading.value = false
   }
@@ -462,19 +492,5 @@ function getStatusText(status: DownloadTask['status']): string {
     paused: '已暂停',
   }
   return map[status] || status
-}
-
-function handleImageError(event: Event) {
-  const img = event.target as HTMLImageElement
-  // 隐藏加载失败的图片
-  img.style.display = 'none'
-  // 显示父元素中的占位图标
-  const parent = img.parentElement
-  if (parent) {
-    const placeholder = parent.querySelector('.material-symbols-outlined')
-    if (placeholder) {
-      (placeholder as HTMLElement).style.display = 'block'
-    }
-  }
 }
 </script>
