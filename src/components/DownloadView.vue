@@ -232,6 +232,21 @@
             </div>
 
             <!-- Error -->
+
+            <!-- Transcode Progress -->
+            <div v-if="task.status === 'downloading' && task.phase === 'transcoding'" class="flex flex-col gap-1">
+              <div class="flex items-center gap-1 text-[10px] text-on-surface-variant">
+                <span class="material-symbols-outlined text-xs">video_stable</span>
+                <span>转码进度</span>
+                <span class="ml-auto">{{ task.transcodeProgress ?? 0 }}%</span>
+              </div>
+              <div class="w-full h-1.5 bg-surface-variant rounded-full overflow-hidden">
+                <div
+                  class="h-full bg-warning rounded-full transition-all duration-500"
+                  :style="{ width: (task.transcodeProgress ?? 0) + '%' }"
+                ></div>
+              </div>
+            </div>
             <div v-if="task.status === 'error' && task.error" class="text-[10px] text-error">
               {{ task.error }}
             </div>

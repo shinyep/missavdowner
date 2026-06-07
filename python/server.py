@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import threading
+import time
 import uuid
 from pathlib import Path
 from datetime import datetime
@@ -287,7 +288,7 @@ def health():
 
 @app.route('/api/download-to-novel', methods=['POST'])
 def download_to_novel():
-    """下载视频并入库到 Novel 项目（按照 missav 脚本的入库逻辑）"""
+    """下载视频并入库到 Novel 项目"""
     data = request.get_json()
     url = data.get('url')
     novel_project_path = data.get('novelProjectPath', 'F:\\novel')
@@ -354,15 +355,13 @@ def download_to_novel():
                 ))
 
                 # 切换到入库阶段
-                download_tasks[task_id]['status'] = 'downloading'
-                download_tasks[task_id]['progress'] = 100
                 download_tasks[task_id]['phase'] = 'importing'
                 download_tasks[task_id]['phaseTitle'] = _phase_title('importing')
                 download_tasks[task_id]['speed'] = '入库中...'
                 download_tasks[task_id]['detail'] = '正在创建 Gallery 和 GalleryVideo'
                 print(f"[Novel] 下载完成，开始入库: {filename}")
 
-                # 步骤1: 创建 Gallery + GalleryVideo（Django FileField 自动移到 gallery_videos/）
+                # 步骤1: 创建 Gallery + GalleryVideo
                 import_script = (
                     "import os, sys\n"
                     "os.environ['DJANGO_SETTINGS_MODULE'] = 'novel_project.settings'\n"
@@ -397,7 +396,6 @@ def download_to_novel():
                 if result.returncode != 0:
                     raise Exception(f"入库脚本失败: {result.stderr}")
 
-                # 解析 video_id
                 video_id = None
                 for line in result.stdout.strip().split('\n'):
                     if line.startswith('VIDEO_ID='):
@@ -411,27 +409,104 @@ def download_to_novel():
                 print(f"[Novel] video_id={video_id}，开始重新编码...")
                 download_tasks[task_id]['phase'] = 'transcoding'
                 download_tasks[task_id]['phaseTitle'] = _phase_title('transcoding')
-                download_tasks[task_id]['speed'] = '重新编码中...'
-                download_tasks[task_id]['detail'] = f'ffmpeg 重新编码 video_id={video_id}'
+                download_tasks[task_id]['speed'] = '转码中...'
+                download_tasks[task_id]['detail'] = f'video_id={video_id}'
 
-                # 步骤2: 调用 process_videos 重新编码（缩略图 + HLS libx264）
-                encode_result = _sp.run(
+                # 步骤2: 使用 Popen 启动 process_videos，轮询 DB 获取进度
+                encode_proc = _sp.Popen(
                     [novel_venv_python, 'manage.py', 'process_videos', '--video_id', str(video_id)],
-                    capture_output=True, text=True, timeout=3600,
+                    stdout=_sp.PIPE, stderr=_sp.PIPE, text=True,
                     cwd=novel_backend,
                     env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}
                 )
 
-                print(f"[Novel] encode stdout: {encode_result.stdout}")
-                if encode_result.stderr:
-                    print(f"[Novel] encode stderr: {encode_result.stderr}")
+                # 轮询数据库进度
+                poll_script = (
+                    "import os, sys\n"
+                    "os.environ['DJANGO_SETTINGS_MODULE'] = 'novel_project.settings'\n"
+                    "sys.path.insert(0, " + repr(novel_backend) + ")\n"
+                    "import django\n"
+                    "django.setup()\n"
+                    "from api.models import GalleryVideo\n"
+                    f"v = GalleryVideo.objects.get(id={video_id})\n"
+                    "print(f'PROGRESS={v.progress}')\n"
+                    "print(f'STATUS={v.status}')\n"
+                )
+
+                prev_progress = 0
+                while encode_proc.poll() is None:
+                    try:
+                        poll_result = _sp.run(
+                            [novel_venv_python, '-c', poll_script],
+                            capture_output=True, text=True, timeout=5,
+                            cwd=novel_backend,
+                            env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}
+                        )
+                        for line in poll_result.stdout.strip().split('\n'):
+                            if line.startswith('PROGRESS='):
+                                prog = int(line.split('=', 1)[1])
+                                if prog > prev_progress:
+                                    prev_progress = prog
+                                    download_tasks[task_id]['transcodeProgress'] = prog
+                                    if prog >= 10:
+                                        download_tasks[task_id]['detail'] = f'正在生成缩略图...'
+                                    if prog >= 20:
+                                        download_tasks[task_id]['detail'] = f'正在优化视频...'
+                                    if prog >= 30:
+                                        download_tasks[task_id]['detail'] = f'正在生成 HLS 流...'
+                    except Exception:
+                        pass
+                    time.sleep(2)
+
+                encode_stdout, encode_stderr = encode_proc.communicate(timeout=60)
+
+                print(f"[Novel] encode stdout: {encode_stdout}")
+                if encode_stderr:
+                    print(f"[Novel] encode stderr: {encode_stderr}")
+
+                if encode_proc.returncode != 0:
+                    print(f"[Novel] 转码警告 (exit {encode_proc.returncode}): {encode_stderr}")
+
+                # 步骤3: 设置 Gallery 封面（从视频缩略图创建 GalleryImage）
+                download_tasks[task_id]['detail'] = '正在设置封面缩略图...'
+                cover_script = (
+                    "import os, sys\n"
+                    "os.environ['DJANGO_SETTINGS_MODULE'] = 'novel_project.settings'\n"
+                    "sys.path.insert(0, " + repr(novel_backend) + ")\n"
+                    "import django\n"
+                    "django.setup()\n"
+                    "from api.models import Gallery, GalleryVideo, GalleryImage\n"
+                    "from django.core.files import File\n"
+                    f"video = GalleryVideo.objects.get(id={video_id})\n"
+                    "gallery = video.gallery\n"
+                    "if not gallery.cover_image and video.thumbnail:\n"
+                    "    thumb_path = video.thumbnail.path\n"
+                    "    with open(thumb_path, 'rb') as f:\n"
+                    "        image = GalleryImage.objects.create(\n"
+                    "            gallery=gallery, image=File(f, name=os.path.basename(thumb_path)), caption='视频缩略图', order=0\n"
+                    "        )\n"
+                    "    gallery.cover_image = image\n"
+                    "    gallery.save(update_fields=['cover_image'])\n"
+                    "    print(f'Cover set: GalleryImage ID={image.id}')\n"
+                    "else:\n"
+                    "    print('Cover already set or no thumbnail')\n"
+                )
+
+                cover_result = _sp.run(
+                    [novel_venv_python, '-c', cover_script],
+                    capture_output=True, text=True, timeout=30,
+                    cwd=novel_backend,
+                    env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}
+                )
+                print(f"[Novel] cover stdout: {cover_result.stdout}")
+                if cover_result.stderr:
+                    print(f"[Novel] cover stderr: {cover_result.stderr}")
 
                 # 切换到清理阶段
                 download_tasks[task_id]['phase'] = 'cleaning'
                 download_tasks[task_id]['phaseTitle'] = _phase_title('cleaning')
                 download_tasks[task_id]['detail'] = '正在删除临时文件'
 
-                # 清理临时文件
                 if os.path.exists(output_path):
                     try:
                         os.remove(output_path)
@@ -440,6 +515,7 @@ def download_to_novel():
                         pass
 
                 download_tasks[task_id]['status'] = 'completed'
+                download_tasks[task_id]['transcodeProgress'] = 100
                 download_tasks[task_id]['phase'] = None
                 download_tasks[task_id]['phaseTitle'] = ''
                 download_tasks[task_id]['novel_video_id'] = video_id
