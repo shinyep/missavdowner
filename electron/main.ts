@@ -298,9 +298,14 @@ function setupIPC() {
   })
 
   // 视频下载
-  ipcMain.handle('video:download', async (_, options: { url: string; outputDir: string }) => {
+  ipcMain.handle('video:download', async (_, options: { url: string; outputDir: string; maxConcurrent?: number; proxy?: string }) => {
     try {
-      const result = await callPythonAPI('/api/download', 'POST', options)
+      const result = await callPythonAPI('/api/download', 'POST', {
+        url: options.url,
+        outputDir: options.outputDir,
+        maxConcurrent: options.maxConcurrent || 10,
+        proxy: options.proxy || ''
+      })
       const taskId = result.task_id
 
       // 开始轮询进度

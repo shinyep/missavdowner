@@ -226,6 +226,19 @@ class VideoDownloader:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         }
         self._paused_tasks: set[str] = set()
+        self._max_concurrent: int = 10
+        self._proxy: str | None = None
+
+    def set_concurrent(self, max_concurrent: int):
+        """设置最大并发数"""
+        self._max_concurrent = max(1, min(max_concurrent, 20))  # 限制在 1-20 之间
+        print(f"设置最大并发数: {self._max_concurrent}")
+
+    def set_proxy(self, proxy: str | None):
+        """设置代理"""
+        self._proxy = proxy if proxy else None
+        if self._proxy:
+            print(f"设置代理: {self._proxy}")
 
     async def download_video(
         self,
@@ -253,8 +266,18 @@ class VideoDownloader:
         try:
             # 1. 下载 m3u8 文件
             print(f"下载 m3u8: {m3u8_url}")
-            async with httpx.AsyncClient() as client:
-                m3u8_resp = await client.get(m3u8_url, headers={**self.headers, 'Referer': referer})
+            print(f"使用并发数: {self._max_concurrent}, 代理: {self._proxy}")
+
+            # 创建 httpx 客户端，支持代理
+            client_kwargs = {
+                'headers': {**self.headers, 'Referer': referer},
+                'timeout': 30
+            }
+            if self._proxy:
+                client_kwargs['proxy'] = self._proxy
+
+            async with httpx.AsyncClient(**client_kwargs) as client:
+                m3u8_resp = await client.get(m3u8_url)
                 m3u8_resp.raise_for_status()
                 playlist_content = m3u8_resp.text
 
@@ -274,7 +297,7 @@ class VideoDownloader:
 
                 # 3. 并发下载所有片段
                 downloaded = 0
-                sem = asyncio.Semaphore(10)
+                sem = asyncio.Semaphore(self._max_concurrent)
 
                 async def download_segment(seg_url: str):
                     nonlocal downloaded

@@ -393,9 +393,22 @@ async function startDownload() {
 
   try {
     if (window.electronAPI?.video?.download) {
+      // 从 localStorage 读取设置
+      let settings = { maxConcurrent: 10, proxy: '' }
+      const saved = localStorage.getItem('app-settings')
+      if (saved) {
+        try {
+          const parsed = JSON.parse(saved)
+          settings.maxConcurrent = parsed.maxConcurrent || 10
+          settings.proxy = parsed.proxy || ''
+        } catch {}
+      }
+
       const task = await window.electronAPI.video.download({
         url: url.value.trim(),
-        outputDir: outputDir.value
+        outputDir: outputDir.value,
+        maxConcurrent: settings.maxConcurrent,
+        proxy: settings.proxy
       })
       downloadQueue.value.unshift(task)
     }

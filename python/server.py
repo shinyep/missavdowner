@@ -89,6 +89,12 @@ def start_download():
     data = request.get_json()
     url = data.get('url')
     output_dir = data.get('outputDir', '')
+    max_concurrent = data.get('maxConcurrent', 10)
+    proxy = data.get('proxy', '')
+
+    # 应用设置
+    downloader.set_concurrent(max_concurrent)
+    downloader.set_proxy(proxy if proxy else None)
 
     if not url:
         return jsonify({'error': 'URL is required'}), 400
