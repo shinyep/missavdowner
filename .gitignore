@@ -39,3 +39,7 @@ build/
 *.tmp
 *.temp
 .history.json
+
+# 本地文档（不上传）
+开发手册.md
+TODO.md
