@@ -339,6 +339,8 @@ def download_to_novel():
         def download_thread():
             import subprocess as _sp
             try:
+                video_id = None
+                gallery_id = None
                 def progress_callback(progress, speed, phase=None, detail=None):
                     download_tasks[task_id]['progress'] = progress
                     download_tasks[task_id]['speed'] = speed
@@ -404,6 +406,16 @@ def download_to_novel():
 
                 if not video_id:
                     raise Exception(f"无法解析 video_id: {result.stdout}")
+
+                gallery_id = None
+                for line in result.stdout.strip().split('\n'):
+                    if 'Gallery ID:' in line:
+                        import re as _re
+                        m = _re.search(r'Gallery ID: (\d+)', line)
+                        if m:
+                            gallery_id = int(m.group(1))
+                            break
+                print(f"[Novel] video_id={video_id}, gallery_id={gallery_id}")
 
                 # 切换到转码阶段
                 print(f"[Novel] video_id={video_id}，开始重新编码...")
@@ -573,6 +585,42 @@ def download_to_novel():
                 download_tasks[task_id]['status'] = 'error'
                 download_tasks[task_id]['error'] = str(e)
                 print(f"[Novel] 入库失败: {e}")
+
+                # 清理临时文件
+                if os.path.exists(output_path):
+                    try:
+                        os.remove(output_path)
+                        print(f"[Novel] 已清理临时文件: {output_path}")
+                    except Exception as ex:
+                        print(f"[Novel] 清理临时文件失败: {ex}")
+
+                # 清理数据库残留 (GalleryVideo + 空 Gallery)
+                if video_id:
+                    cleanup_script = (
+                        "import os, sys\n"
+                        "os.environ['DJANGO_SETTINGS_MODULE'] = 'novel_project.settings'\n"
+                        "sys.path.insert(0, " + repr(novel_backend) + ")\n"
+                        "import django\n"
+                        "django.setup()\n"
+                        "from api.models import GalleryVideo, Gallery\n"
+                        f"try: video = GalleryVideo.objects.get(id={video_id}); gallery = video.gallery; video.delete(); print('DELETED_VIDEO'); " +
+                        f"print(f'Gallery {gallery.id} video_count=' + str(gallery.galleryvideo_set.count())); " +
+                        "if gallery.galleryvideo_set.count() == 0: gallery.delete(); print('DELETED_GALLERY')\n"
+                        "except Exception as ex: print(f'DELETE_ERR: {ex}')\n"
+                        "else: print('CLEANUP_DONE')\n"
+                    )
+                    try:
+                        cr = _sp.run(
+                            [novel_venv_python, '-c', cleanup_script],
+                            capture_output=True, text=True, timeout=15,
+                            cwd=novel_backend,
+                            env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}
+                        )
+                        print(f"[Novel] 清理结果: {cr.stdout.strip()}")
+                        if cr.stderr:
+                            print(f"[Novel] 清理 stderr: {cr.stderr}")
+                    except Exception as ex:
+                        print(f"[Novel] 数据库清理失败: {ex}")
 
         thread = threading.Thread(target=download_thread, daemon=True)
         thread.start()
