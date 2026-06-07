@@ -17,6 +17,7 @@ process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, 
 
 let win: BrowserWindow | null = null
 let pythonProcess: ChildProcess | null = null
+let serverReady = false
 
 // Python 后端端口
 const PYTHON_PORT = 15678
@@ -130,7 +131,15 @@ function startPythonBackend() {
     })
 
     pythonProcess.stderr?.on('data', (data) => {
-      console.error(`[Server Error] ${data.toString().trim()}`)
+      const msg = data.toString().trim()
+      console.error(`[Server Error] ${msg}`)
+      // 发送启动错误到渲染进程
+      if (win && (msg.includes('Error') || msg.includes('Traceback') || msg.includes('ModuleNotFoundError') || msg.includes('ImportError'))) {
+        win.webContents.send('download:error', {
+          taskId: 'server',
+          error: `服务器启动失败: ${msg.substring(0, 200)}`
+        })
+      }
     })
 
     pythonProcess.on('error', (err) => {
@@ -301,6 +310,11 @@ function setupIPC() {
   // 视频解析
   ipcMain.handle('video:parse', async (_, url: string) => {
     try {
+      if (!serverReady) {
+        console.log('Waiting for Python server to be ready...')
+        await waitForServer()
+        serverReady = true
+      }
       const result = await callPythonAPI('/api/parse', 'POST', { url })
       return result
     } catch (error: any) {
@@ -500,10 +514,18 @@ function setupIPC() {
 }
 
 // 应用生命周期
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   setupIPC()
   createWindow()
   startPythonBackend()
+
+  // 后台等待服务器就绪
+  waitForServer().then(() => {
+    serverReady = true
+    console.log('Python server ready confirmation complete')
+  }).catch((err) => {
+    console.error('Server ready check failed:', err.message)
+  })
 })
 
 app.on('window-all-closed', () => {
