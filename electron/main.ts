@@ -107,10 +107,21 @@ function startPythonBackend() {
 
   console.log(`Starting backend: ${pythonPath} ${serverPy}`)
 
+  // 历史记录存储目录
+  const historyDir = path.join(os.homedir(), '.missav')
+  if (!fs.existsSync(historyDir)) {
+    fs.mkdirSync(historyDir, { recursive: true })
+  }
+  console.log(`History directory: ${historyDir}`)
+
   try {
     pythonProcess = spawn(pythonPath, [serverPy, '--port', String(PYTHON_PORT)], {
       cwd: path.join(resPath, 'python'),
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+      env: {
+        ...process.env,
+        PYTHONIOENCODING: 'utf-8',
+        MISSAV_HISTORY_DIR: historyDir
+      },
       windowsHide: true
     })
 

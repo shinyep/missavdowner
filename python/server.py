@@ -21,12 +21,27 @@ CORS(app)
 # 下载任务存储
 download_tasks: dict[str, dict] = {}
 
-# 历史记录文件
-HISTORY_FILE = Path(__file__).parent / "history.json"
+# 历史记录文件 - 使用用户主目录下的 .missav 目录
+def get_history_file():
+    """获取历史记录文件路径"""
+    # 优先使用环境变量指定的路径
+    history_dir = os.environ.get('MISSAV_HISTORY_DIR')
+    if history_dir:
+        history_path = Path(history_dir)
+    else:
+        # 使用用户主目录
+        history_path = Path.home() / '.missav'
+    history_path.mkdir(parents=True, exist_ok=True)
+    return history_path / 'history.json'
+
+HISTORY_FILE = None  # 延迟初始化
 
 
 def load_history() -> list[dict]:
     """加载历史记录"""
+    global HISTORY_FILE
+    if HISTORY_FILE is None:
+        HISTORY_FILE = get_history_file()
     if HISTORY_FILE.exists():
         try:
             with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
