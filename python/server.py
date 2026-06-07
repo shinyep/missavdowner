@@ -458,7 +458,8 @@ def download_to_novel():
 
                 prev_progress = 0
                 transcode_ok = True
-                while encode_proc.poll() is None:
+                poll_count = 0
+                while encode_proc.poll() is None and poll_count < 3600:
                     try:
                         poll_result = _sp.run(
                             [novel_venv_python, '-c', poll_script],
@@ -498,6 +499,7 @@ def download_to_novel():
                     except Exception as poll_err:
                         print(f"[Novel] 进度轮询异常: {poll_err}")
                     time.sleep(2)
+                    poll_count += 1
 
                 if not transcode_ok:
                     raise Exception(f"转码失败 (video_id={video_id})")
