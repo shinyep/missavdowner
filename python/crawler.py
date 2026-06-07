@@ -1,4 +1,4 @@
-"""
+﻿"""
 MissAV 视频爬虫核心模块
 从 missav.ws 提取视频信息和下载链接
 """
@@ -245,7 +245,9 @@ class VideoDownloader:
         m3u8_url: str,
         referer: str,
         output_path: str,
-        progress_callback=None
+        progress_callback=None,
+        auto_merge: bool = True,
+        keep_temp_files: bool = False
     ) -> str:
         """
         下载 m3u8 视频并合并为 mp4
@@ -317,29 +319,39 @@ class VideoDownloader:
                 await asyncio.gather(*tasks)
                 print("所有片段下载完成")
 
-            # 4. 使用 ffmpeg 合并
-            print(f"合并视频到: {output}")
-            ffmpeg_cmd = [
-                'ffmpeg', '-hide_banner', '-loglevel', 'error',
-                '-protocol_whitelist', 'file,pipe',
-                '-i', str(local_m3u8),
-                '-c', 'copy',
-                '-bsf:a', 'aac_adtstoasc',
-                '-y', str(output)
-            ]
+            if auto_merge:
+                # 4. 使用 ffmpeg 合并
+                print(f"合并视频到: {output}")
+                ffmpeg_cmd = [
+                    'ffmpeg', '-hide_banner', '-loglevel', 'error',
+                    '-protocol_whitelist', 'file,pipe',
+                    '-i', str(local_m3u8),
+                    '-c', 'copy',
+                    '-bsf:a', 'aac_adtstoasc',
+                    '-y', str(output)
+                ]
 
-            process = await asyncio.create_subprocess_exec(
-                *ffmpeg_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
+                process = await asyncio.create_subprocess_exec(
+                    *ffmpeg_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
 
-            _, stderr = await process.communicate()
+                _, stderr = await process.communicate()
 
-            if process.returncode != 0:
-                raise RuntimeError(f"ffmpeg 合并失败: {stderr.decode()}")
+                if process.returncode != 0:
+                    raise RuntimeError(f"ffmpeg 合并失败: {stderr.decode()}")
 
-            print(f"视频合并完成: {output}")
+                print(f"视频合并完成: {output}")
+            else:
+                # 不合并，直接返回第一个片段路径
+                print("跳过合并，保留原始片段")
+                import shutil
+                output_dir = output.parent / f"{output.stem}_segments"
+                if output_dir.exists():
+                    shutil.rmtree(output_dir)
+                shutil.copytree(temp_dir, output_dir)
+                output = output_dir / "playlist.m3u8"
 
             if progress_callback:
                 progress_callback(100, "完成")
@@ -349,7 +361,10 @@ class VideoDownloader:
         finally:
             # 清理临时目录
             import shutil
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            if not keep_temp_files:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            else:
+                print(f"保留临时文件: {temp_dir}")
 
     def pause_task(self, task_id: str):
         """暂停任务"""

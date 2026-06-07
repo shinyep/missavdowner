@@ -1,5 +1,5 @@
-<template>
-  <div class="flex-1 flex flex-col overflow-hidden bg-surface">
+﻿<template>
+  <div class="flex-1 flex flex-col overflow-hidden bg-surface relative">
     <div class="px-8 py-4 border-b border-outline-variant/10">
       <h2 class="font-headline text-lg font-bold text-on-surface">设置</h2>
     </div>
@@ -41,10 +41,13 @@
               v-model="settings.maxConcurrent"
               class="h-9 bg-surface-container-highest rounded-md px-3 text-sm text-on-surface border border-outline-variant/10 focus:outline-none focus:ring-1 focus:ring-primary"
             >
-              <option :value="1">1</option>
-              <option :value="2">2</option>
-              <option :value="3">3</option>
               <option :value="5">5</option>
+              <option :value="8">8</option>
+              <option :value="10">10</option>
+              <option :value="16">16</option>
+              <option :value="20">20</option>
+              <option :value="24">24</option>
+              <option :value="32">32</option>
             </select>
           </div>
 
@@ -124,6 +127,24 @@
         </div>
       </div>
     </div>
+      <!-- Toast 提示 -->
+    <transition
+      enter-active-class="transition-all duration-300 ease-out"
+      enter-from-class="opacity-0 translate-y-2"
+      enter-to-class="opacity-100 translate-y-0"
+      leave-active-class="transition-all duration-200 ease-in"
+      leave-from-class="opacity-100 translate-y-0"
+      leave-to-class="opacity-0 translate-y-2"
+    >
+      <div
+        v-if="showToast"
+        class="absolute bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-2 px-4 py-2.5 bg-inverse-surface text-inverse-on-surface rounded-lg shadow-lg text-sm font-medium"
+      >
+        <span class="material-symbols-outlined text-base text-primary">check_circle</span>
+        {{ toastMessage }}
+      </div>
+    </transition>
+
   </div>
 </template>
 
@@ -131,9 +152,22 @@
 import { ref, onMounted } from 'vue'
 import type { AppSettings } from '../types'
 
+const showToast = ref(false)
+const toastMessage = ref('')
+let toastTimer: ReturnType<typeof setTimeout> | null = null
+
+function showToastMsg(msg: string) {
+  toastMessage.value = msg
+  showToast.value = true
+  if (toastTimer) clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => {
+    showToast.value = false
+  }, 2000)
+}
+
 const settings = ref<AppSettings>({
   downloadDir: '',
-  maxConcurrent: 2,
+  maxConcurrent: 16,
   autoMerge: true,
   keepTempFiles: false,
   proxy: ''
@@ -167,13 +201,13 @@ async function selectDownloadDir() {
 async function saveSettings() {
   // 保存设置到本地存储
   localStorage.setItem('app-settings', JSON.stringify(settings.value))
-  alert('设置已保存')
+  showToastMsg('设置已保存')
 }
 
 function resetSettings() {
   settings.value = {
     downloadDir: settings.value.downloadDir,
-    maxConcurrent: 2,
+    maxConcurrent: 16,
     autoMerge: true,
     keepTempFiles: false,
     proxy: ''

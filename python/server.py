@@ -1,4 +1,4 @@
-"""
+﻿"""
 Flask HTTP 服务器
 提供 API 接口供 Electron 调用
 """
@@ -106,6 +106,8 @@ def start_download():
     output_dir = data.get('outputDir', '')
     max_concurrent = data.get('maxConcurrent', 10)
     proxy = data.get('proxy', '')
+    auto_merge = data.get('autoMerge', True)
+    keep_temp = data.get('keepTempFiles', False)
 
     # 应用设置
     downloader.set_concurrent(max_concurrent)
@@ -152,7 +154,9 @@ def start_download():
                     video_info['m3u8_url'],
                     url,
                     output_path,
-                    progress_callback
+                    progress_callback,
+                    auto_merge=auto_merge,
+                    keep_temp_files=keep_temp
                 ))
 
                 download_tasks[task_id]['status'] = 'completed'

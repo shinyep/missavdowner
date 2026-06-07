@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div class="flex-1 flex flex-col overflow-hidden bg-surface">
     <div class="flex items-center justify-between px-8 py-4 border-b border-outline-variant/10">
       <h2 class="font-headline text-lg font-bold text-on-surface">下载历史</h2>
@@ -24,7 +24,7 @@
     </div>
 
     <div class="flex-1 overflow-y-auto px-8 py-4">
-      <!-- 空状态 -->
+      <!-- 绌虹姸鎬?-->
       <div v-if="historyList.length === 0" class="flex flex-col items-center justify-center h-full text-on-surface-variant">
         <span class="material-symbols-outlined text-5xl mb-3">history</span>
         <p class="text-sm">暂无下载历史</p>
@@ -48,9 +48,9 @@
               <h4 class="text-sm font-medium text-on-surface truncate">{{ item.title }}</h4>
               <div class="flex items-center gap-2 mt-1 text-xs text-on-surface-variant">
                 <span v-if="item.code" class="font-mono">{{ item.code }}</span>
-                <span v-if="item.actresses?.length">· {{ item.actresses[0] }}</span>
-                <span>· {{ formatDate(item.downloadedAt) }}</span>
-                <span v-if="item.fileSize">· {{ item.fileSize }}</span>
+                <span v-if="item.actresses?.length">路 {{ item.actresses[0] }}</span>
+                <span>路 {{ formatDate(item.downloadedAt) }}</span>
+                <span v-if="item.fileSize">路 {{ item.fileSize }}</span>
               </div>
             </div>
             <!-- 操作 -->
@@ -85,8 +85,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import type { HistoryRecord } from '../types'
+
+const props = defineProps<{
+  active: boolean
+}>()
 
 const searchQuery = ref('')
 const historyList = ref<HistoryRecord[]>([])
@@ -103,15 +107,23 @@ const filteredHistory = computed(() => {
 
 onMounted(async () => {
   await loadHistory()
-
-  // 监听历史记录更新事件
-  window.addEventListener('history-updated', () => {
-    loadHistory()
-  })
 })
 
+// 监听历史更新事件
+const handleHistoryUpdated = () => {
+  loadHistory()
+}
+window.addEventListener('history-updated', handleHistoryUpdated)
+
 onUnmounted(() => {
-  window.removeEventListener('history-updated', () => {})
+  window.removeEventListener('history-updated', handleHistoryUpdated)
+})
+
+// 页面切换时刷新
+watch(() => props.active, (isActive) => {
+  if (isActive) {
+    loadHistory()
+  }
 })
 
 async function loadHistory() {

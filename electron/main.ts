@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard, net } from 'electron'
+﻿import { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard, net } from 'electron'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { spawn, ChildProcess } from 'node:child_process'
@@ -309,13 +309,15 @@ function setupIPC() {
   })
 
   // 视频下载
-  ipcMain.handle('video:download', async (_, options: { url: string; outputDir: string; maxConcurrent?: number; proxy?: string }) => {
+  ipcMain.handle('video:download', async (_, options: { url: string; outputDir: string; maxConcurrent?: number; proxy?: string; autoMerge?: boolean; keepTempFiles?: boolean }) => {
     try {
       const result = await callPythonAPI('/api/download', 'POST', {
         url: options.url,
         outputDir: options.outputDir,
-        maxConcurrent: options.maxConcurrent || 10,
-        proxy: options.proxy || ''
+        maxConcurrent: options.maxConcurrent || 16,
+        proxy: options.proxy || '',
+        autoMerge: options.autoMerge !== false,
+        keepTempFiles: options.keepTempFiles || false
       })
       const taskId = result.task_id
 

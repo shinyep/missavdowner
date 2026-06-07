@@ -1,8 +1,8 @@
-{
+﻿{
   "name": "missav-downloader",
-  "version": "1.1.3",
+  "version": "1.2.0",
   "private": true,
-  "description": "MissAV 视频下载器 - Windows 11 原生应用",
+  "description": "MissAV 瑙嗛涓嬭浇鍣?- Windows 11 鍘熺敓搴旂敤",
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
@@ -72,3 +72,4 @@
     "compression": "maximum"
   }
 }
+

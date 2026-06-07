@@ -6,7 +6,7 @@
     <!-- Main Content -->
     <main class="flex-1 flex overflow-hidden">
       <DownloadView v-show="currentTab === 'download'" />
-      <HistoryView v-show="currentTab === 'history'" />
+      <HistoryView v-show="currentTab === 'history'" :active="currentTab === 'history'" />
       <SettingsView v-show="currentTab === 'settings'" />
       <AboutView v-show="currentTab === 'about'" />
     </main>

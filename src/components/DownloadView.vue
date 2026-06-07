@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div class="flex-1 flex overflow-hidden">
     <!-- Left Panel -->
     <section class="w-[65%] flex flex-col bg-surface relative">
@@ -394,13 +394,15 @@ async function startDownload() {
   try {
     if (window.electronAPI?.video?.download) {
       // 从 localStorage 读取设置
-      let settings = { maxConcurrent: 10, proxy: '' }
+      let settings = { maxConcurrent: 16, proxy: '', autoMerge: true, keepTempFiles: false }
       const saved = localStorage.getItem('app-settings')
       if (saved) {
         try {
           const parsed = JSON.parse(saved)
           settings.maxConcurrent = parsed.maxConcurrent || 10
           settings.proxy = parsed.proxy || ''
+          settings.autoMerge = parsed.autoMerge !== false
+          settings.keepTempFiles = parsed.keepTempFiles || false
         } catch {}
       }
 
@@ -408,7 +410,9 @@ async function startDownload() {
         url: url.value.trim(),
         outputDir: outputDir.value,
         maxConcurrent: settings.maxConcurrent,
-        proxy: settings.proxy
+        proxy: settings.proxy,
+        autoMerge: settings.autoMerge,
+        keepTempFiles: settings.keepTempFiles
       })
       downloadQueue.value.unshift(task)
     }

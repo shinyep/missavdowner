@@ -1,4 +1,4 @@
-export type TabType = 'download' | 'history' | 'settings' | 'about'
+﻿export type TabType = 'download' | 'history' | 'settings' | 'about'
 
 export interface VideoInfo {
   title: string
@@ -23,6 +23,8 @@ export interface DownloadTask {
   outputPath: string
   error?: string
   createdAt: number
+  /** 下载模式：local=下载到本地，novel=入库到 novel 项目 */
+  downloadMode?: 'local' | 'novel'
 }
 
 export interface HistoryRecord {
@@ -36,6 +38,7 @@ export interface HistoryRecord {
   outputPath: string
   fileSize: string
   downloadedAt: number
+  downloadMode?: 'local' | 'novel'
 }
 
 export interface AppSettings {
@@ -44,6 +47,15 @@ export interface AppSettings {
   autoMerge: boolean
   keepTempFiles: boolean
   proxy: string
+  /** novel 项目路径，用于入库功能 */
+  novelProjectPath: string
+}
+
+/** 入库到 novel 项目的结果 */
+export interface NovelImportResult {
+  success: boolean
+  galleryId?: number
+  message?: string
 }
 
 // Electron API 类型声明
@@ -71,7 +83,7 @@ export interface ElectronAPI {
   }
   video: {
     parse: (url: string) => Promise<VideoInfo>
-    download: (options: { url: string; outputDir: string }) => Promise<DownloadTask>
+    download: (options: { url: string; outputDir: string; downloadMode?: 'local' | 'novel'; novelProjectPath?: string }) => Promise<DownloadTask>
     pauseDownload: (taskId: string) => Promise<void>
     resumeDownload: (taskId: string) => Promise<void>
     cancelDownload: (taskId: string) => Promise<void>
