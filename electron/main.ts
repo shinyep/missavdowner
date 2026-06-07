@@ -184,6 +184,23 @@ function stopPythonBackend() {
 }
 
 // 调用 Python API
+async function waitForServer(maxRetries: number = 30): Promise<void> {
+  const url = `http://127.0.0.1:${PYTHON_PORT}/health`
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      const response = await fetch(url)
+      if (response.ok) {
+        console.log(`Python server is ready (attempt ${i + 1})`)
+        return
+      }
+    } catch {
+      // Server not ready yet
+    }
+    await new Promise(resolve => setTimeout(resolve, 1000))
+  }
+  throw new Error(`Python server failed to start after ${maxRetries}s`)
+}
+
 async function callPythonAPI(endpoint: string, method: string = 'GET', body?: any): Promise<any> {
   const url = `http://127.0.0.1:${PYTHON_PORT}${endpoint}`
   const options: RequestInit = {
@@ -544,4 +561,5 @@ app.on('activate', () => {
 app.on('before-quit', () => {
   stopPythonBackend()
 })
+
 
