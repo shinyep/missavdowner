@@ -47,11 +47,8 @@ class MissavCrawler:
                 print(f"正在访问: {url}")
                 await page.goto(url, wait_until='domcontentloaded', timeout=60000)
 
-                # 检查 Cloudflare 质询
-                cf_challenge = await page.query_selector("#challenge-running")
-                if cf_challenge:
-                    print("检测到 Cloudflare 质询，等待...")
-                    await page.wait_for_selector('body:not(#challenge-running)', timeout=30000)
+                # 处理 Cloudflare 质询（多策略）
+                await self._handle_cloudflare(page)
 
                 # 提取标题
                 title = await self._extract_title(page)
@@ -74,6 +71,77 @@ class MissavCrawler:
 
             finally:
                 await browser.close()
+
+    async def _handle_cloudflare(self, page: Page):
+        """处理 Cloudflare 质询 - 多策略应对"""
+        # 策略1: 先给页面一点时间加载
+        await page.wait_for_timeout(3000)
+
+        # 策略2: 检查页面标题是否为 Cloudflare 质询
+        title = await page.title()
+        if title in ("Just a moment...", "Attention Required", "Checking your browser"):
+            print(f"检测到 Cloudflare 质询 (标题: {title})，等待自动验证...")
+            try:
+                # 等待标题改变（质询通过后会变成正常页面标题）
+                await page.wait_for_function(
+                    f"document.title !== '{title}'",
+                    timeout=30000
+                )
+                print("Cloudflare 质询已通过")
+                await page.wait_for_timeout(2000)  # 等页面完全渲染
+                return
+            except Exception:
+                print("Cloudflare 标题等待超时，尝试其他策略...")
+
+        # 策略3: 检查旧的 #challenge-running 选择器
+        cf_challenge = await page.query_selector("#challenge-running")
+        if cf_challenge:
+            print("检测到 Cloudflare 质询 (#challenge-running)，等待...")
+            try:
+                await page.wait_for_selector('body:not(#challenge-running)', timeout=30000)
+                print("Cloudflare 质询已通过")
+                await page.wait_for_timeout(2000)
+                return
+            except Exception:
+                print("Cloudflare #challenge-running 等待超时")
+
+        # 策略4: 检查页面中 Cloudflare 相关元素
+        cf_selectors = [
+            "#challenge-form",
+            ".cf-browser-verification",
+            "#turnstile-wrapper",
+            "[data-challenge]",
+            "iframe[src*='challenges.cloudflare.com']",
+        ]
+        for selector in cf_selectors:
+            cf_el = await page.query_selector(selector)
+            if cf_el:
+                print(f"检测到 Cloudflare 元素 ({selector})，等待...")
+                # 等待该元素消失
+                try:
+                    await page.wait_for_selector(selector, state='detached', timeout=30000)
+                    print("Cloudflare 质询已通过")
+                    await page.wait_for_timeout(2000)
+                    return
+                except Exception:
+                    print(f"Cloudflare {selector} 等待超时")
+                break
+
+        # 策略5: 通用等待 - 等网络空闲再检查内容是否加载
+        print("未检测到明显的 Cloudflare 质询，等待网络空闲...")
+        try:
+            await page.wait_for_load_state('networkidle', timeout=15000)
+        except Exception:
+            print("网络空闲等待超时，继续尝试提取...")
+
+        # 策略6: 验证页面内容是否真实加载（非空壳）
+        body_text = await page.text_content('body') or ''
+        if len(body_text) < 200 and 'cloudflare' in body_text.lower():
+            print("页面内容异常（疑似 Cloudflare 隐形质询），额外等待 10 秒...")
+            await page.wait_for_timeout(10000)
+            # 检查标题是否改变
+            new_title = await page.title()
+            print(f"最终页面标题: {new_title}")
 
     async def _extract_title(self, page: Page) -> str:
         """提取视频标题"""
