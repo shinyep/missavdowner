@@ -1,4 +1,4 @@
-﻿export type TabType = 'download' | 'history' | 'settings' | 'about'
+export type TabType = 'download' | 'history' | 'settings' | 'about'
 
 export interface VideoInfo {
   title: string
@@ -23,6 +23,14 @@ export interface DownloadTask {
   outputPath: string
   error?: string
   createdAt: number
+  /** 当前阶段（动作） */
+  phase?: 'download_segments' | 'merging' | 'importing' | 'transcoding' | 'cleaning'
+  /** 阶段中文描述 */
+  phaseTitle?: string
+  /** 额外详情，如临时目录路径 */
+  detail?: string
+  /** 转码进度（0-100） */
+  transcodeProgress?: number
   /** 下载模式：local=下载到本地，novel=入库到 novel 项目 */
   downloadMode?: 'local' | 'novel'
 }
@@ -91,7 +99,16 @@ export interface ElectronAPI {
     resumeDownload: (taskId: string) => Promise<void>
     cancelDownload: (taskId: string) => Promise<void>
   }
-  onDownloadProgress: (callback: (data: { taskId: string; progress: number; speed: string; status?: string }) => void) => () => void
+  onDownloadProgress: (callback: (data: {
+    taskId: string
+    progress: number
+    speed: string
+    status?: string
+    phase?: DownloadTask['phase']
+    phaseTitle?: string
+    detail?: string
+    transcodeProgress?: number
+  }) => void) => () => void
   onDownloadCompleted: (callback: (data: { taskId: string; filename: string }) => void) => () => void
   onDownloadError: (callback: (data: { taskId: string; error: string }) => void) => () => void
   history: {
@@ -108,8 +125,3 @@ declare global {
     electronAPI: ElectronAPI
   }
 }
-
-
-
-
-

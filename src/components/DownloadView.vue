@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <div class="flex-1 flex overflow-hidden">
     <!-- Left Panel -->
     <section class="w-[65%] flex flex-col bg-surface relative">
@@ -203,7 +203,7 @@
                     'bg-surface-variant text-on-surface-variant': task.status === 'paused' || task.status === 'pending'
                   }"
                 >
-                  {{ getStatusText(task.status) }}
+                  {{ task.phaseTitle || getStatusText(task.status) }}
                 </span>
                 <span v-if="task.downloadMode === 'novel'" class="text-[10px] px-1.5 py-0.5 rounded-sm bg-primary/10 text-primary font-medium">
                   入库
@@ -211,16 +211,22 @@
               </div>
             </div>
 
+            <!-- Phase detail -->
+            <div v-if="task.status === 'downloading' && task.detail" class="text-[10px] text-on-surface-variant truncate">
+              {{ task.detail }}
+            </div>
+
             <!-- Progress Bar -->
             <div v-if="task.status === 'downloading'" class="flex flex-col gap-1">
               <div class="w-full h-1.5 bg-surface-variant rounded-full overflow-hidden">
                 <div
-                  class="h-full bg-primary rounded-full transition-all duration-300"
+                  class="h-full rounded-full transition-all duration-300"
+                  :class="task.phase === 'transcoding' ? 'bg-warning' : 'bg-primary'"
                   :style="{ width: task.progress + '%' }"
                 ></div>
               </div>
               <div class="flex justify-between text-[10px] text-on-surface-variant">
-                <span>{{ task.progress.toFixed(1) }}%</span>
+                <span>{{ task.phase === 'merging' || task.phase === 'transcoding' ? '处理中...' : task.progress.toFixed(1) + '%' }}</span>
                 <span>{{ task.speed }}</span>
               </div>
             </div>
@@ -314,6 +320,10 @@ onMounted(async () => {
         task.progress = data.progress
         task.speed = data.speed
         if (data.status) task.status = data.status as DownloadTask['status']
+        if (data.phase !== undefined) task.phase = data.phase
+        if (data.phaseTitle !== undefined) task.phaseTitle = data.phaseTitle
+        if (data.detail !== undefined) task.detail = data.detail
+        if (data.transcodeProgress !== undefined) task.transcodeProgress = data.transcodeProgress
       }
     })
   }
@@ -494,5 +504,3 @@ function getStatusText(status: DownloadTask['status']): string {
   return map[status] || status
 }
 </script>
-
-

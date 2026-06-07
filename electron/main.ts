@@ -308,17 +308,24 @@ function setupIPC() {
     }
   })
 
-  // 视频下载
-  ipcMain.handle('video:download', async (_, options: { url: string; outputDir: string; maxConcurrent?: number; proxy?: string; autoMerge?: boolean; keepTempFiles?: boolean }) => {
+    // 视频下载（支持本地下载和 Novel 入库两种模式）
+  ipcMain.handle('video:download', async (_, options: { url: string; outputDir: string; maxConcurrent?: number; proxy?: string; autoMerge?: boolean; keepTempFiles?: boolean; downloadMode?: string; novelProjectPath?: string; novelBackendUrl?: string }) => {
     try {
-      const result = await callPythonAPI('/api/download', 'POST', {
+      const isNovelMode = options.downloadMode === 'novel'
+      const apiEndpoint = isNovelMode ? '/api/download-to-novel' : '/api/download'
+      const body: any = {
         url: options.url,
-        outputDir: options.outputDir,
         maxConcurrent: options.maxConcurrent || 16,
         proxy: options.proxy || '',
         autoMerge: options.autoMerge !== false,
         keepTempFiles: options.keepTempFiles || false
-      })
+      }
+      if (isNovelMode) {
+        body.novelProjectPath = options.novelProjectPath || 'F:\\\\novel'
+      } else {
+        body.outputDir = options.outputDir
+      }
+      const result = await callPythonAPI(apiEndpoint, 'POST', body)
       const taskId = result.task_id
 
       // 开始轮询进度
@@ -331,7 +338,11 @@ function setupIPC() {
             taskId,
             progress: progress.progress,
             speed: progress.speed,
-            status: progress.status
+            status: progress.status,
+            phase: progress.phase,
+            phaseTitle: progress.phaseTitle,
+            detail: progress.detail,
+            transcodeProgress: progress.transcodeProgress
           })
 
           // 下载完成

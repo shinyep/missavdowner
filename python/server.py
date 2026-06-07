@@ -1,4 +1,4 @@
-﻿"""
+"""
 Flask HTTP 服务器
 提供 API 接口供 Electron 调用
 """
@@ -82,6 +82,18 @@ def run_async(coro):
     return result
 
 
+def _phase_title(phase: str) -> str:
+    """将阶段代码转为中文描述"""
+    titles = {
+        'download_segments': '正在下载视频片段',
+        'merging': '正在合并视频',
+        'importing': '正在入库到数据库',
+        'transcoding': '正在重新编码',
+        'cleaning': '正在清理临时文件',
+    }
+    return titles.get(phase, phase or '')
+
+
 @app.route('/api/parse', methods=['POST'])
 def parse_video():
     """解析视频信息"""
@@ -141,14 +153,23 @@ def start_download():
             'status': 'downloading',
             'progress': 0,
             'speed': '0 MB/s',
+            'phase': 'download_segments',
+            'phaseTitle': _phase_title('download_segments'),
+            'detail': '',
+            'transcodeProgress': 0,
         }
 
         # 在后台线程中开始下载
         def download_thread():
             try:
-                def progress_callback(progress, speed):
+                def progress_callback(progress, speed, phase=None, detail=None):
                     download_tasks[task_id]['progress'] = progress
                     download_tasks[task_id]['speed'] = speed
+                    if phase:
+                        download_tasks[task_id]['phase'] = phase
+                        download_tasks[task_id]['phaseTitle'] = _phase_title(phase)
+                    if detail:
+                        download_tasks[task_id]['detail'] = detail
 
                 result = run_async(downloader.download_video(
                     video_info['m3u8_url'],
@@ -161,6 +182,8 @@ def start_download():
 
                 download_tasks[task_id]['status'] = 'completed'
                 download_tasks[task_id]['progress'] = 100
+                download_tasks[task_id]['phase'] = None
+                download_tasks[task_id]['phaseTitle'] = ''
 
                 # 保存到历史记录
                 history = load_history()
@@ -208,7 +231,11 @@ def get_progress(task_id: str):
         'progress': task['progress'],
         'speed': task['speed'],
         'status': task['status'],
-        'error': task.get('error')
+        'error': task.get('error'),
+        'phase': task.get('phase'),
+        'phaseTitle': task.get('phaseTitle', ''),
+        'detail': task.get('detail', ''),
+        'transcodeProgress': task.get('transcodeProgress', 0),
     })
 
 
@@ -257,6 +284,204 @@ def clear_history():
 def health():
     """健康检查"""
     return jsonify({'status': 'ok'})
+
+@app.route('/api/download-to-novel', methods=['POST'])
+def download_to_novel():
+    """下载视频并入库到 Novel 项目（按照 missav 脚本的入库逻辑）"""
+    data = request.get_json()
+    url = data.get('url')
+    novel_project_path = data.get('novelProjectPath', 'F:\\novel')
+    max_concurrent = data.get('maxConcurrent', 10)
+    proxy = data.get('proxy', '')
+    auto_merge = data.get('autoMerge', True)
+    keep_temp = data.get('keepTempFiles', False)
+
+    downloader.set_concurrent(max_concurrent)
+    downloader.set_proxy(proxy if proxy else None)
+
+    if not url:
+        return jsonify({'error': 'URL is required'}), 400
+
+    try:
+        video_info = run_async(crawler.parse_video(url))
+        if not video_info.get('m3u8_url'):
+            return jsonify({'error': '无法获取视频下载链接'}), 400
+
+        task_id = str(uuid.uuid4())[:8]
+        safe_title = "".join(c for c in video_info['title'] if c.isalnum() or c in ' _-').strip()[:50]
+        filename = f"{video_info.get('code', '') or safe_title}.mp4"
+
+        # Novel 项目路径
+        novel_backend = os.path.join(novel_project_path, 'backend')
+        novel_venv_python = os.path.join(novel_backend, 'venv', 'Scripts', 'python.exe')
+        novel_media_root = os.path.join(novel_project_path, 'img')
+        temp_dir = os.path.join(novel_media_root, 'temp_videos')
+        os.makedirs(temp_dir, exist_ok=True)
+        output_path = os.path.join(temp_dir, filename)
+
+        download_tasks[task_id] = {
+            'id': task_id,
+            'url': url,
+            'video_info': video_info,
+            'filename': filename,
+            'output_path': output_path,
+            'status': 'downloading',
+            'progress': 0,
+            'speed': '0 MB/s',
+            'downloadMode': 'novel',
+            'phase': 'download_segments',
+            'phaseTitle': _phase_title('download_segments'),
+            'detail': f'临时目录: {temp_dir}',
+            'transcodeProgress': 0,
+        }
+
+        def download_thread():
+            import subprocess as _sp
+            try:
+                def progress_callback(progress, speed, phase=None, detail=None):
+                    download_tasks[task_id]['progress'] = progress
+                    download_tasks[task_id]['speed'] = speed
+                    if phase:
+                        download_tasks[task_id]['phase'] = phase
+                        download_tasks[task_id]['phaseTitle'] = _phase_title(phase)
+                    if detail:
+                        download_tasks[task_id]['detail'] = detail
+
+                # 下载视频到 Novel 的 temp_videos 目录
+                run_async(downloader.download_video(
+                    video_info['m3u8_url'], url, output_path, progress_callback,
+                    auto_merge=auto_merge, keep_temp_files=keep_temp
+                ))
+
+                # 切换到入库阶段
+                download_tasks[task_id]['status'] = 'downloading'
+                download_tasks[task_id]['progress'] = 100
+                download_tasks[task_id]['phase'] = 'importing'
+                download_tasks[task_id]['phaseTitle'] = _phase_title('importing')
+                download_tasks[task_id]['speed'] = '入库中...'
+                download_tasks[task_id]['detail'] = '正在创建 Gallery 和 GalleryVideo'
+                print(f"[Novel] 下载完成，开始入库: {filename}")
+
+                # 步骤1: 创建 Gallery + GalleryVideo（Django FileField 自动移到 gallery_videos/）
+                import_script = (
+                    "import os, sys\n"
+                    "os.environ['DJANGO_SETTINGS_MODULE'] = 'novel_project.settings'\n"
+                    "sys.path.insert(0, " + repr(novel_backend) + ")\n"
+                    "import django\n"
+                    "django.setup()\n"
+                    "from api.models import Gallery, GalleryVideo\n"
+                    "from django.core.files import File\n"
+                    "video_path = " + repr(output_path) + "\n"
+                    "gallery_title = " + repr(video_info['title']) + "\n"
+                    "video_caption = " + repr(filename) + "\n"
+                    "gallery, created = Gallery.objects.get_or_create(title=gallery_title, defaults={'cover_image': None})\n"
+                    "print(f'Gallery ID: {gallery.id}, created={created}')\n"
+                    "with open(video_path, 'rb') as f:\n"
+                    "    django_file = File(f, name=video_caption)\n"
+                    "    video = GalleryVideo.objects.create(gallery=gallery, video_file=django_file, caption=video_caption, order=0)\n"
+                    "print(f'GalleryVideo ID: {video.id}')\n"
+                    "print(f'VIDEO_ID={video.id}')\n"
+                )
+
+                result = _sp.run(
+                    [novel_venv_python, '-c', import_script],
+                    capture_output=True, text=True, timeout=120,
+                    cwd=novel_backend,
+                    env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}
+                )
+
+                print(f"[Novel] import stdout: {result.stdout}")
+                if result.stderr:
+                    print(f"[Novel] import stderr: {result.stderr}")
+
+                if result.returncode != 0:
+                    raise Exception(f"入库脚本失败: {result.stderr}")
+
+                # 解析 video_id
+                video_id = None
+                for line in result.stdout.strip().split('\n'):
+                    if line.startswith('VIDEO_ID='):
+                        video_id = int(line.split('=', 1)[1])
+                        break
+
+                if not video_id:
+                    raise Exception(f"无法解析 video_id: {result.stdout}")
+
+                # 切换到转码阶段
+                print(f"[Novel] video_id={video_id}，开始重新编码...")
+                download_tasks[task_id]['phase'] = 'transcoding'
+                download_tasks[task_id]['phaseTitle'] = _phase_title('transcoding')
+                download_tasks[task_id]['speed'] = '重新编码中...'
+                download_tasks[task_id]['detail'] = f'ffmpeg 重新编码 video_id={video_id}'
+
+                # 步骤2: 调用 process_videos 重新编码（缩略图 + HLS libx264）
+                encode_result = _sp.run(
+                    [novel_venv_python, 'manage.py', 'process_videos', '--video_id', str(video_id)],
+                    capture_output=True, text=True, timeout=3600,
+                    cwd=novel_backend,
+                    env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}
+                )
+
+                print(f"[Novel] encode stdout: {encode_result.stdout}")
+                if encode_result.stderr:
+                    print(f"[Novel] encode stderr: {encode_result.stderr}")
+
+                # 切换到清理阶段
+                download_tasks[task_id]['phase'] = 'cleaning'
+                download_tasks[task_id]['phaseTitle'] = _phase_title('cleaning')
+                download_tasks[task_id]['detail'] = '正在删除临时文件'
+
+                # 清理临时文件
+                if os.path.exists(output_path):
+                    try:
+                        os.remove(output_path)
+                        print(f"[Novel] 已清理临时文件: {output_path}")
+                    except Exception:
+                        pass
+
+                download_tasks[task_id]['status'] = 'completed'
+                download_tasks[task_id]['phase'] = None
+                download_tasks[task_id]['phaseTitle'] = ''
+                download_tasks[task_id]['novel_video_id'] = video_id
+                print(f"[Novel] 入库完成! video_id={video_id}")
+
+                # 保存到历史记录
+                history = load_history()
+                history.insert(0, {
+                    'id': task_id,
+                    'title': video_info['title'],
+                    'filename': filename,
+                    'cover': video_info.get('cover', ''),
+                    'actresses': video_info.get('actresses', []),
+                    'tags': video_info.get('tags', []),
+                    'code': video_info.get('code', ''),
+                    'outputPath': f'Novel DB video_id={video_id}',
+                    'fileSize': '',
+                    'downloadedAt': int(datetime.now().timestamp() * 1000),
+                    'downloadMode': 'novel',
+                    'novelVideoId': video_id,
+                })
+                save_history(history)
+
+            except Exception as e:
+                download_tasks[task_id]['status'] = 'error'
+                download_tasks[task_id]['error'] = str(e)
+                print(f"[Novel] 入库失败: {e}")
+
+        thread = threading.Thread(target=download_thread, daemon=True)
+        thread.start()
+
+        return jsonify({
+            'task_id': task_id,
+            'filename': filename,
+            'status': 'downloading',
+            'downloadMode': 'novel'
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 
 
 if __name__ == '__main__':

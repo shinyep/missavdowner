@@ -1,4 +1,4 @@
-﻿"""
+"""
 MissAV 视频爬虫核心模块
 从 missav.ws 提取视频信息和下载链接
 """
@@ -256,7 +256,7 @@ class VideoDownloader:
             m3u8_url: m3u8 播放列表 URL
             referer: 来源页面 URL
             output_path: 输出文件路径
-            progress_callback: 进度回调函数 (progress: float, speed: str) -> None
+            progress_callback: 进度回调函数 (progress: float, speed: str, phase: str, detail: str) -> None
 
         Returns:
             输出文件路径
@@ -311,7 +311,10 @@ class VideoDownloader:
                                 (temp_dir / filename).write_bytes(resp.content)
                                 downloaded += 1
                                 if progress_callback:
-                                    progress_callback(downloaded / total_segments * 50, f"{downloaded}/{total_segments}")
+                                    try:
+                                        progress_callback(downloaded / total_segments * 50, f"{downloaded}/{total_segments}", 'download_segments')
+                                    except TypeError:
+                                        progress_callback(downloaded / total_segments * 50, f"{downloaded}/{total_segments}")
                         except Exception as e:
                             print(f"下载片段失败: {e}")
 
@@ -322,6 +325,11 @@ class VideoDownloader:
             if auto_merge:
                 # 4. 使用 ffmpeg 合并
                 print(f"合并视频到: {output}")
+                if progress_callback:
+                    try:
+                        progress_callback(50, '合并中...', 'merging', str(temp_dir))
+                    except TypeError:
+                        progress_callback(50, '合并中...')
                 ffmpeg_cmd = [
                     'ffmpeg', '-hide_banner', '-loglevel', 'error',
                     '-protocol_whitelist', 'file,pipe',
@@ -354,7 +362,10 @@ class VideoDownloader:
                 output = output_dir / "playlist.m3u8"
 
             if progress_callback:
-                progress_callback(100, "完成")
+                try:
+                    progress_callback(100, '完成', None, str(temp_dir))
+                except TypeError:
+                    progress_callback(100, '完成')
 
             return str(output)
 

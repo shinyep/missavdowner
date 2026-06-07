@@ -1,6 +1,6 @@
 {
   "name": "missav-downloader",
-  "version": "1.2.1",
+  "version": "1.3.1",
   "private": true,
   "description": "MissAV 瑙嗛涓嬭浇鍣?- Windows 11 鍘熺敓搴旂敤",
   "main": "dist-electron/main.js",
@@ -49,7 +49,14 @@
       {
         "from": "./python",
         "to": "./python",
-        "filter": ["**/*", "!**/__pycache__/**", "!**/.venv/**", "!**/dist/**", "!**/build/**", "!**/*.spec"]
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/.venv/**",
+          "!**/dist/**",
+          "!**/build/**",
+          "!**/*.spec"
+        ]
       }
     ],
     "win": {
@@ -72,4 +79,3 @@
     "compression": "maximum"
   }
 }
-
