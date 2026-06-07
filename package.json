@@ -1,0 +1,75 @@
+{
+  "name": "missav-downloader",
+  "version": "1.0.9",
+  "private": true,
+  "type": "module",
+  "description": "MissAV 视频下载器 - Windows 11 原生应用",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc && vite build && electron-builder",
+    "preview": "vite preview",
+    "lint": "eslint src --ext .ts,.vue"
+  },
+  "dependencies": {
+    "vue": "^3.4.21",
+    "electron-updater": "^6.8.3"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.4",
+    "autoprefixer": "^10.4.27",
+    "electron": "30.0.1",
+    "electron-builder": "^24.13.3",
+    "postcss": "^8.5.8",
+    "tailwindcss": "^3.4.1",
+    "typescript": "^5.2.2",
+    "vite": "^5.1.6",
+    "vite-plugin-electron": "^0.28.6",
+    "vite-plugin-electron-renderer": "^0.14.5",
+    "vue-tsc": "^2.0.26"
+  },
+  "build": {
+    "appId": "com.missav.downloader",
+    "productName": "MissAV Downloader",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*"
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "**/ffmpeg.exe"
+    ],
+    "extraResources": [
+      {
+        "from": "./resources/ffmpeg.exe",
+        "to": "./ffmpeg.exe"
+      },
+      {
+        "from": "./python",
+        "to": "./python",
+        "filter": ["**/*", "!**/__pycache__/**", "!**/.venv/**", "!**/dist/**", "!**/build/**", "!**/*.spec"]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    },
+    "npmRebuild": false,
+    "nodeGypRebuild": false,
+    "compression": "maximum"
+  }
+}
