@@ -413,9 +413,11 @@ def download_to_novel():
                 download_tasks[task_id]['detail'] = f'video_id={video_id}'
 
                 # 步骤2: 使用 Popen 启动 process_videos，轮询 DB 获取进度
+                encode_cmd = [novel_venv_python, 'manage.py', 'process_videos', '--video_id', str(video_id)]
+                print(f"[Novel] 启动转码: {' '.join(encode_cmd)}")
                 encode_proc = _sp.Popen(
-                    [novel_venv_python, 'manage.py', 'process_videos', '--video_id', str(video_id)],
-                    stdout=_sp.PIPE, stderr=_sp.PIPE, text=True,
+                    encode_cmd,
+                    stdout=_sp.DEVNULL, stderr=_sp.PIPE, text=True,
                     cwd=novel_backend,
                     env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}
                 )
@@ -468,7 +470,6 @@ def download_to_novel():
 
                 encode_stdout, encode_stderr = encode_proc.communicate(timeout=60)
 
-                print(f"[Novel] encode stdout: {encode_stdout}")
                 if encode_stderr:
                     print(f"[Novel] encode stderr: {encode_stderr}")
 
