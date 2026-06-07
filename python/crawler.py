@@ -2,7 +2,7 @@
 MissAV 视频爬虫核心模块
 从 missav.ws 提取视频信息和下载链接
 """
-import asyncio`nimport traceback
+import asyncio
 import re
 import time
 from pathlib import Path
@@ -34,83 +34,43 @@ class MissavCrawler:
         Returns:
             包含视频信息的字典
         """
-        print(f"[LOG][parse_video] START parsing: {url}")
-        print(f"[LOG][parse_video] Launching browser...")
         async with async_playwright() as p:
-            try:
-                browser = await p.chromium.launch(headless=True)
-                print(f"[LOG][parse_video] Browser launched successfully")
-            except Exception as e:
-                print(f"[LOG][parse_video] Browser launch FAILED: {e}")
-                raise
-
+            browser = await p.chromium.launch(headless=True)
             context = await browser.new_context(
                 user_agent=self.headers['User-Agent'],
                 viewport={'width': 1920, 'height': 1080}
             )
             page = await context.new_page()
-            print(f"[LOG][parse_video] Page created")
 
             try:
                 # 导航到页面
-                print(f"[LOG][parse_video] Navigating to: {url}")
-                try:
-                    resp = await page.goto(url, wait_until='domcontentloaded', timeout=60000)
-                    print(f"[LOG][parse_video] Navigation response status: {resp.status if resp else 'None'}")
-                    print(f"[LOG][parse_video] Current URL after nav: {await page.url()}")
-                except Exception as e:
-                    print(f"[LOG][parse_video] Navigation FAILED: {e}")
-                    # Try to get page content anyway
-                    try:
-                        print(f"[LOG][parse_video] Page title after nav error: {await page.title()}")
-                    except:
-                        pass
-                    raise
+                print(f"正在访问: {url}")
+                await page.goto(url, wait_until='domcontentloaded', timeout=60000)
 
                 # 检查 Cloudflare 质询
                 cf_challenge = await page.query_selector("#challenge-running")
                 if cf_challenge:
-                    print("[LOG][parse_video] Cloudflare challenge detected, waiting...")
-                    try:
-                        await page.wait_for_selector('body:not(#challenge-running)', timeout=30000)
-                        print("[LOG][parse_video] Cloudflare challenge passed")
-                    except Exception as e:
-                        print(f"[LOG][parse_video] Cloudflare wait FAILED: {e}")
+                    print("检测到 Cloudflare 质询，等待...")
+                    await page.wait_for_selector('body:not(#challenge-running)', timeout=30000)
 
                 # 提取标题
-                print("[LOG][parse_video] Extracting title...")
                 title = await self._extract_title(page)
-                print(f"[LOG][parse_video] Title result: {title}")
 
                 # 提取封面图
-                print("[LOG][parse_video] Extracting cover...")
                 cover = await self._extract_cover(page)
-                print(f"[LOG][parse_video] Cover result: {cover[:100] if cover else 'EMPTY'}")
 
                 # 提取元数据
-                print("[LOG][parse_video] Extracting metadata...")
                 metadata = await self._extract_metadata(page)
-                print(f"[LOG][parse_video] Metadata result: {metadata}")
 
                 # 监听 m3u8 请求
-                print("[LOG][parse_video] Capturing m3u8...")
                 m3u8_url = await self._capture_m3u8(page, url)
-                print(f"[LOG][parse_video] m3u8_url result: {m3u8_url}")
 
-                result = {
+                return {
                     'title': title,
                     'cover': cover,
                     'm3u8_url': m3u8_url,
                     **metadata
                 }
-                print(f"[LOG][parse_video] DONE - returning result")
-                return result
-
-            except Exception as e:
-                print(f"[LOG][parse_video] UNHANDLED ERROR in parse_video: {e}")
-                import traceback
-                traceback.print_exc()
-                raise
 
             finally:
                 await browser.close()
@@ -226,102 +186,35 @@ class MissavCrawler:
 
     async def _capture_m3u8(self, page: Page, referer: str) -> str | None:
         """捕获页面发起的 m3u8 请求"""
-        print(f"[LOG][capture_m3u8] START - setting up request listener")
         m3u8_url = None
         m3u8_future = asyncio.Future()
 
-        # Also log ALL requests for debugging
-        all_requests = []
-        def log_all_requests(request):
-            all_requests.append(request.url)
-
         def handle_request(request):
             nonlocal m3u8_url
-            log_all_requests(request)
             if ".m3u8" in request.url and not m3u8_future.done():
-                print(f"[LOG][capture_m3u8] M3U8 FOUND: {request.url}")
+                print(f"捕获到 m3u8 请求: {request.url}")
                 m3u8_url = request.url
                 m3u8_future.set_result(request.url)
 
         page.on("request", handle_request)
-        print(f"[LOG][capture_m3u8] Request listener registered")
-
-        # Dump page info
-        try:
-            page_title = await page.title()
-            page_url = page.url
-            print(f"[LOG][capture_m3u8] Page title: {page_title}")
-            print(f"[LOG][capture_m3u8] Page url: {page_url}")
-
-            # Check available video/play selectors
-            selectors_to_check = [
-                '.plyr__control--overlaid',
-                'video',
-                'video source',
-                '.plyr',
-                '.video-js',
-                '[data-plyr]',
-                'button[aria-label="Play"]',
-                '.play-button',
-            ]
-            for sel in selectors_to_check:
-                el = await page.query_selector(sel)
-                if el:
-                    attrs = {}
-                    try:
-                        for attr in ['src', 'data-plyr-embed-id', 'data-video-id', 'poster', 'class']:
-                            val = await el.get_attribute(attr)
-                            if val:
-                                attrs[attr] = val
-                    except:
-                        pass
-                    print(f"[LOG][capture_m3u8] Found element: {sel} attrs={attrs}")
-        except Exception as e:
-            print(f"[LOG][capture_m3u8] Error checking page state: {e}")
 
         # 尝试点击播放按钮
-        print(f"[LOG][capture_m3u8] Looking for play button...")
         try:
             play_btn = await page.query_selector('.plyr__control--overlaid')
             if play_btn:
-                print(f"[LOG][capture_m3u8] Play button found, clicking...")
+                print("点击播放按钮...")
                 await play_btn.click(timeout=5000, force=True)
-                print(f"[LOG][capture_m3u8] Play button clicked")
-                # Wait a bit for requests to fire
-                await asyncio.sleep(2)
-            else:
-                print(f"[LOG][capture_m3u8] Play button NOT found (.plyr__control--overlaid)")
-                # Try clicking the video element directly
-                video_el = await page.query_selector('video')
-                if video_el:
-                    print(f"[LOG][capture_m3u8] Trying to click video element...")
-                    await video_el.click(timeout=5000, force=True)
-                    await asyncio.sleep(2)
         except Exception as e:
-            print(f"[LOG][capture_m3u8] Play button click FAILED: {e}")
-
-        # Log all requests seen so far
-        print(f"[LOG][capture_m3u8] Total requests captured: {len(all_requests)}")
-        m3u8_requests = [r for r in all_requests if '.m3u8' in r]
-        video_requests = [r for r in all_requests if any(x in r.lower() for x in ['.mp4', '.m3u8', '.ts', 'video', 'hls'])]
-        print(f"[LOG][capture_m3u8] m3u8 requests: {m3u8_requests}")
-        print(f"[LOG][capture_m3u8] Video-related requests: {video_requests}")
+            print(f"点击播放按钮失败: {e}")
 
         # 等待 m3u8 请求
         try:
-            print(f"[LOG][capture_m3u8] Waiting for m3u8 request (timeout=20s)...")
             await asyncio.wait_for(m3u8_future, timeout=20)
-            print(f"[LOG][capture_m3u8] M3U8 captured successfully")
         except asyncio.TimeoutError:
-            print(f"[LOG][capture_m3u8] TIMEOUT: No m3u8 request detected within 20s")
-            # Dump final request list
-            new_requests = [r for r in all_requests if '.m3u8' in r]
-            print(f"[LOG][capture_m3u8] Final m3u8 requests: {new_requests}")
-            print(f"[LOG][capture_m3u8] Total requests: {len(all_requests)}")
+            print("超时: 未捕获到 m3u8 请求")
         finally:
             page.remove_listener("request", handle_request)
 
-        print(f"[LOG][capture_m3u8] RETURNING: {m3u8_url}")
         return m3u8_url
 
 
@@ -489,4 +382,3 @@ class VideoDownloader:
 # 单例实例
 crawler = MissavCrawler()
 downloader = VideoDownloader()
-

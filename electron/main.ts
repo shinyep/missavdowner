@@ -17,7 +17,6 @@ process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, 
 
 let win: BrowserWindow | null = null
 let pythonProcess: ChildProcess | null = null
-let serverReady = false
 
 // Python 后端端口
 const PYTHON_PORT = 15678
@@ -131,15 +130,7 @@ function startPythonBackend() {
     })
 
     pythonProcess.stderr?.on('data', (data) => {
-      const msg = data.toString().trim()
-      console.error(`[Server Error] ${msg}`)
-      // 发送启动错误到渲染进程
-      if (win && (msg.includes('Error') || msg.includes('Traceback') || msg.includes('ModuleNotFoundError') || msg.includes('ImportError'))) {
-        win.webContents.send('download:error', {
-          taskId: 'server',
-          error: `服务器启动失败: ${msg.substring(0, 200)}`
-        })
-      }
+      console.error(`[Server Error] ${data.toString().trim()}`)
     })
 
     pythonProcess.on('error', (err) => {
@@ -184,23 +175,6 @@ function stopPythonBackend() {
 }
 
 // 调用 Python API
-async function waitForServer(maxRetries: number = 30): Promise<void> {
-  const url = `http://127.0.0.1:${PYTHON_PORT}/health`
-  for (let i = 0; i < maxRetries; i++) {
-    try {
-      const response = await fetch(url)
-      if (response.ok) {
-        console.log(`Python server is ready (attempt ${i + 1})`)
-        return
-      }
-    } catch {
-      // Server not ready yet
-    }
-    await new Promise(resolve => setTimeout(resolve, 1000))
-  }
-  throw new Error(`Python server failed to start after ${maxRetries}s`)
-}
-
 async function callPythonAPI(endpoint: string, method: string = 'GET', body?: any): Promise<any> {
   const url = `http://127.0.0.1:${PYTHON_PORT}${endpoint}`
   const options: RequestInit = {
@@ -327,11 +301,6 @@ function setupIPC() {
   // 视频解析
   ipcMain.handle('video:parse', async (_, url: string) => {
     try {
-      if (!serverReady) {
-        console.log('Waiting for Python server to be ready...')
-        await waitForServer()
-        serverReady = true
-      }
       const result = await callPythonAPI('/api/parse', 'POST', { url })
       return result
     } catch (error: any) {
@@ -339,80 +308,9 @@ function setupIPC() {
     }
   })
 
-  // 视频下载（支持本地下载 / 入库到 novel 项目）
-  ipcMain.handle('video:download', async (_, options: {
-    url: string; outputDir: string; maxConcurrent?: number; proxy?: string;
-    autoMerge?: boolean; keepTempFiles?: boolean;
-    downloadMode?: 'local' | 'novel'; novelProjectPath?: string; novelBackendUrl?: string
-  }) => {
+  // 视频下载
+  ipcMain.handle('video:download', async (_, options: { url: string; outputDir: string; maxConcurrent?: number; proxy?: string; autoMerge?: boolean; keepTempFiles?: boolean }) => {
     try {
-      const downloadMode = options.downloadMode || 'local'
-
-      // 入库模式：下载完成后调用入库 API
-      if (downloadMode === 'novel') {
-        const result = await callPythonAPI('/api/download-and-import', 'POST', {
-          url: options.url,
-          maxConcurrent: options.maxConcurrent || 16,
-          proxy: options.proxy || '',
-          autoMerge: options.autoMerge !== false,
-          keepTempFiles: options.keepTempFiles || false,
-          novelProjectPath: options.novelProjectPath || '',
-          novelBackendUrl: options.novelBackendUrl || 'http://127.0.0.1:8002'
-        })
-        const taskId = result.task_id
-
-        // 轮询进度
-        const pollProgress = async () => {
-          try {
-            const progress = await callPythonAPI(`/api/progress/${taskId}`)
-
-            win?.webContents.send('download:progress', {
-              taskId,
-              progress: progress.progress,
-              speed: progress.speed,
-              status: progress.status
-            })
-
-            if (progress.status === 'completed') {
-              win?.webContents.send('download:completed', {
-                taskId,
-                filename: result.filename
-              })
-              return
-            }
-
-            if (progress.status === 'error') {
-              win?.webContents.send('download:error', {
-                taskId,
-                error: progress.error || '入库失败'
-              })
-              return
-            }
-
-            setTimeout(pollProgress, 1500)
-          } catch (error) {
-            console.error('Progress poll error:', error)
-          }
-        }
-
-        pollProgress()
-
-        return {
-          id: taskId,
-          filename: result.filename || '入库处理中...',
-          title: '',
-          cover: '',
-          status: 'downloading',
-          progress: 0,
-          speed: '等待中',
-          size: '',
-          outputPath: '',
-          createdAt: Date.now(),
-          downloadMode: 'novel'
-        }
-      }
-
-      // 本地下载模式
       const result = await callPythonAPI('/api/download', 'POST', {
         url: options.url,
         outputDir: options.outputDir,
@@ -423,10 +321,12 @@ function setupIPC() {
       })
       const taskId = result.task_id
 
+      // 开始轮询进度
       const pollProgress = async () => {
         try {
           const progress = await callPythonAPI(`/api/progress/${taskId}`)
 
+          // 发送进度更新
           win?.webContents.send('download:progress', {
             taskId,
             progress: progress.progress,
@@ -434,6 +334,7 @@ function setupIPC() {
             status: progress.status
           })
 
+          // 下载完成
           if (progress.status === 'completed') {
             win?.webContents.send('download:completed', {
               taskId,
@@ -442,6 +343,7 @@ function setupIPC() {
             return
           }
 
+          // 下载失败
           if (progress.status === 'error') {
             win?.webContents.send('download:error', {
               taskId,
@@ -531,18 +433,10 @@ function setupIPC() {
 }
 
 // 应用生命周期
-app.whenReady().then(async () => {
+app.whenReady().then(() => {
   setupIPC()
   createWindow()
   startPythonBackend()
-
-  // 后台等待服务器就绪
-  waitForServer().then(() => {
-    serverReady = true
-    console.log('Python server ready confirmation complete')
-  }).catch((err) => {
-    console.error('Server ready check failed:', err.message)
-  })
 })
 
 app.on('window-all-closed', () => {
@@ -561,5 +455,3 @@ app.on('activate', () => {
 app.on('before-quit', () => {
   stopPythonBackend()
 })
-
-

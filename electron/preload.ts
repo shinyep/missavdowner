@@ -37,17 +37,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 视频操作
   video: {
     parse: (url: string) => ipcRenderer.invoke('video:parse', url),
-    download: (options: {
-      url: string
-      outputDir: string
-      maxConcurrent?: number
-      proxy?: string
-      autoMerge?: boolean
-      keepTempFiles?: boolean
-      downloadMode?: 'local' | 'novel'
-      novelProjectPath?: string
-      novelBackendUrl?: string
-    }) => ipcRenderer.invoke('video:download', options),
+    download: (options: { url: string; outputDir: string; maxConcurrent?: number; proxy?: string; autoMerge?: boolean; keepTempFiles?: boolean }) => ipcRenderer.invoke('video:download', options),
     pauseDownload: (taskId: string) => ipcRenderer.invoke('download:pause', taskId),
   },
 
