@@ -1,4 +1,4 @@
-import { ipcRenderer, contextBridge } from 'electron'
+﻿import { ipcRenderer, contextBridge } from 'electron'
 
 // 暴露 API 给渲染进程
 contextBridge.exposeInMainWorld('electronAPI', {
@@ -41,6 +41,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     download: (options: { url: string; outputDir: string; maxConcurrent?: number; proxy?: string; autoMerge?: boolean; keepTempFiles?: boolean; downloadMode?: string; novelProjectPath?: string; novelBackendUrl?: string }) => ipcRenderer.invoke('video:download', options),
     pauseDownload: (taskId: string) => ipcRenderer.invoke('download:pause', taskId),
     retryTranscode: (options: { videoId: number; novelProjectPath?: string }) => ipcRenderer.invoke('video:retryTranscode', options),
+  },
+
+  // 图集操作
+  gallery: {
+    parse: (options: { galleryUrl: string; proxy?: string }) => ipcRenderer.invoke('gallery:parse', options),
+    download: (options: { galleryUrl: string; outputDir: string; downloadMode?: string; novelProjectPath?: string; proxy?: string }) => ipcRenderer.invoke('gallery:download', options),
   },
 
   // 下载进度监听

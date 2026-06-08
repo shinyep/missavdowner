@@ -1,5 +1,6 @@
+# -*- coding: utf-8 -*-
 """
-Novel project video import script.
+Novel project video/image import helpers.
 """
 import os
 import sys
@@ -109,3 +110,85 @@ def import_video_to_novel(novel_project_path: str, output_path: str, title: str,
         return {'success': False, 'video_id': None, 'message': 'Import timeout'}
     except Exception as e:
         return {'success': False, 'video_id': None, 'message': f'Import exception: {str(e)}'}
+
+
+def import_images_to_novel(novel_project_path: str, title: str, image_paths: list[str]) -> dict:
+    novel_backend = os.path.join(novel_project_path, 'backend')
+    venv_python = os.path.join(novel_backend, 'venv', 'Scripts', 'python.exe')
+    if not os.path.exists(venv_python):
+        venv_python = 'python'
+
+    safe_title = (title or 'Untitled Gallery')[:200]
+    existing_paths = [os.path.abspath(path) for path in image_paths if os.path.exists(path)]
+    if not existing_paths:
+        return {'success': False, 'gallery_id': None, 'message': 'No image files to import'}
+
+    django_script = '\n'.join([
+        'import os, sys',
+        f"sys.path.insert(0, {repr(novel_backend)})",
+        "os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'novel_project.settings')",
+        'import django; django.setup()',
+        'from pathlib import Path',
+        'from django.core.files import File',
+        'from api.models import Gallery, GalleryImage',
+        f'title = {repr(safe_title)}',
+        f'image_paths = {repr(existing_paths)}',
+        'gallery, created = Gallery.objects.get_or_create(title=title)',
+        "existing_captions = set(GalleryImage.objects.filter(gallery=gallery).values_list('caption', flat=True))",
+        "order = GalleryImage.objects.filter(gallery=gallery).count()",
+        'created_ids = []',
+        'for image_path in image_paths:',
+        '    path = Path(image_path)',
+        '    if not path.exists():',
+        '        continue',
+        "    order += 1",
+        "    caption = f'{gallery.id}_{order:03d}{path.suffix.lower() or '.jpg'}'",
+        '    if caption in existing_captions:',
+        '        continue',
+        "    with path.open('rb') as file_obj:",
+        '        image = GalleryImage(gallery=gallery, caption=caption, order=order)',
+        '        image.image.save(caption, File(file_obj), save=True)',
+        '    created_ids.append(image.id)',
+        '    existing_captions.add(caption)',
+        '    if not gallery.cover_image:',
+        '        gallery.cover_image = image',
+        '        gallery.save(update_fields=["cover_image"])',
+        "print(f'GALLERY_ID:{gallery.id}')",
+        "print(f'IMAGES_CREATED:{len(created_ids)}')",
+    ])
+
+    import re
+    import subprocess
+    try:
+        proc = subprocess.run(
+            [venv_python, '-c', django_script],
+            capture_output=True, text=True, timeout=300,
+            cwd=novel_backend,
+            env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}
+        )
+        stdout = proc.stdout.strip()
+        stderr = proc.stderr.strip() if proc.stderr else ''
+        gallery_match = re.search(r'GALLERY_ID:(\d+)', stdout)
+        count_match = re.search(r'IMAGES_CREATED:(\d+)', stdout)
+        if proc.returncode == 0 and gallery_match:
+            gallery_id = int(gallery_match.group(1))
+            image_count = int(count_match.group(1)) if count_match else 0
+            return {
+                'success': True,
+                'gallery_id': gallery_id,
+                'image_count': image_count,
+                'message': f'Import OK (gallery_id={gallery_id}, images={image_count})',
+                'stdout': stdout,
+                'stderr': stderr,
+            }
+        return {
+            'success': False,
+            'gallery_id': None,
+            'message': f'Import failed (rc={proc.returncode})',
+            'stdout': stdout,
+            'stderr': stderr,
+        }
+    except subprocess.TimeoutExpired:
+        return {'success': False, 'gallery_id': None, 'message': 'Import timeout'}
+    except Exception as e:
+        return {'success': False, 'gallery_id': None, 'message': f'Import exception: {str(e)}'}

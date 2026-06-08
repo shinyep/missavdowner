@@ -82,6 +82,7 @@ defineEmits<{
 
 const tabs = [
   { key: 'download' as TabType, label: '解析下载' },
+  { key: 'gallery' as TabType, label: '图集下载' },
   { key: 'history' as TabType, label: '下载历史' },
   { key: 'about' as TabType, label: '关于软件' },
 ]

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard, net } from 'electron'
+﻿import { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard, net } from 'electron'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { spawn, ChildProcess } from 'node:child_process'
@@ -366,6 +366,88 @@ function setupIPC() {
   })
 
   // 暂停下载
+    ipcMain.handle('gallery:parse', async (_, options: {
+    galleryUrl: string
+    proxy?: string
+  }) => {
+    try {
+      return await callPythonAPI('/api/gallery/parse', 'POST', options)
+    } catch (error: any) {
+      throw new Error(error.message || '图集解析失败')
+    }
+  })
+
+  ipcMain.handle('gallery:download', async (_, options: {
+
+    galleryUrl: string
+    outputDir: string
+    downloadMode?: string
+    novelProjectPath?: string
+    proxy?: string
+  }) => {
+    try {
+      const result = await callPythonAPI('/api/gallery/download', 'POST', options)
+      const taskId = result.task_id
+
+      const pollProgress = async () => {
+        try {
+          const progress = await callPythonAPI(`/api/download-status/${taskId}`)
+          win?.webContents.send('download:progress', {
+            taskId,
+            progress: progress.progress,
+            speed: progress.speed,
+            status: progress.status,
+            phase: progress.phase,
+            phaseTitle: progress.phaseTitle,
+            detail: progress.detail,
+            outputPath: progress.output_path,
+          })
+
+          if (progress.status === 'completed') {
+            win?.webContents.send('download:completed', {
+              taskId,
+              filename: progress.filename || result.filename,
+              outputPath: progress.output_path
+            })
+            return
+          }
+
+          if (progress.status === 'error') {
+            win?.webContents.send('download:error', {
+              taskId,
+              error: progress.error || '图集下载失败'
+            })
+            return
+          }
+
+          setTimeout(pollProgress, 1000)
+        } catch (error) {
+          console.error('Gallery progress poll error:', error)
+        }
+      }
+
+      pollProgress()
+
+      return {
+        id: taskId,
+        filename: result.filename || '解析中...',
+        title: '',
+        cover: '',
+        status: 'downloading',
+        progress: 0,
+        speed: '0 张/秒',
+        size: '',
+        outputPath: options.outputDir || '',
+        createdAt: Date.now(),
+        downloadMode: options.downloadMode || 'local',
+        phase: 'parsing',
+        phaseTitle: '解析图集',
+      }
+    } catch (error: any) {
+      throw new Error(error.message || '图集下载失败')
+    }
+  })
+
   ipcMain.handle('download:pause', async (_, taskId: string) => {
     try {
       await callPythonAPI(`/api/pause-download/${taskId}`, 'POST')

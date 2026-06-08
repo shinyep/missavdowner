@@ -1,4 +1,4 @@
-"""
+﻿"""
 Flask HTTP server - provides API for Electron app.
 Supports missav.ws and kissjav.com
 """
@@ -18,7 +18,8 @@ from flask_cors import CORS
 
 from crawler import crawler as missav_crawler, downloader as missav_downloader
 
-from novel_import import import_video_to_novel
+from image_crawler import ImageGalleryCrawler
+from novel_import import import_video_to_novel, import_images_to_novel
 
 # Optional kissjav support
 try:
@@ -92,12 +93,13 @@ def run_async(coro):
 
 def _phase_title(phase):
     return {
-        'download_segments': 'Downloading segments',
-        'downloading': 'Downloading',
-        'merging': 'Merging video',
-        'importing': 'Importing to Novel',
-        'transcoding': 'Transcoding',
-        'cleaning': 'Cleaning temp files',
+        'parsing': '解析图集',
+        'download_segments': '下载分片',
+        'downloading': '下载中',
+        'merging': '合并视频',
+        'importing': '入库到 Novel',
+        'transcoding': '转码中',
+        'cleaning': '清理临时文件',
     }.get(phase, phase or '')
 
 # ==================== API Routes ====================
@@ -273,6 +275,117 @@ def start_download_to_novel():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/gallery/parse', methods=['POST'])
+def parse_gallery():
+    data = request.get_json()
+    gallery_url = data.get('galleryUrl', '')
+    proxy = data.get('proxy', '')
+    if not gallery_url:
+        return jsonify({'error': 'Gallery URL required'}), 400
+    try:
+        crawler = ImageGalleryCrawler(proxy=proxy)
+        result = run_async(crawler.parse_gallery(gallery_url))
+        return jsonify({
+            'title': result.title,
+            'page_url': result.page_url,
+            'image_count': len(result.image_urls),
+            'image_urls': result.image_urls,
+        })
+    except Exception as e:
+        print(f"[Gallery Parse] Error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/gallery/download', methods=['POST'])
+
+def start_gallery_download():
+    data = request.get_json()
+    gallery_url = data.get('galleryUrl', '')
+    download_mode = data.get('downloadMode', 'local')
+    novel_project_path = data.get('novelProjectPath', '')
+    proxy = data.get('proxy', '')
+
+    if not gallery_url:
+        return jsonify({'error': 'Gallery URL required'}), 400
+
+    if download_mode == 'novel':
+        if not novel_project_path:
+            return jsonify({'error': 'Novel project path required'}), 400
+        cache_dir = Path(novel_project_path) / 'img' / 'gallery-cache'
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        output_dir = str(cache_dir)
+    else:
+        output_dir = data.get('outputDir', '') or os.path.expanduser('~\\Downloads')
+
+    task_id = str(uuid.uuid4())[:8]
+    download_tasks[task_id] = {
+        'id': task_id, 'url': gallery_url, 'video_info': {'title': '图集下载'}, 
+        'filename': '解析中...', 'output_path': output_dir,
+        'status': 'downloading', 'progress': 0, 'speed': '0 张/秒',
+        'phase': 'parsing', 'phaseTitle': _phase_title('parsing'),
+        'detail': '', 'transcodeProgress': 0,
+        'downloadMode': download_mode, 'source': 'gallery',
+    }
+
+    def _progress(progress, speed, phase=None, detail=None, extra=None):
+        task = download_tasks[task_id]
+        task['progress'] = progress
+        task['speed'] = speed
+        if phase:
+            task['phase'] = phase
+            task['phaseTitle'] = _phase_title(phase)
+        if detail:
+            task['detail'] = detail
+        if extra:
+            task['total_images'] = extra.get('total_images')
+            task['current_index'] = extra.get('current_index')
+            task['success_count'] = extra.get('success_count')
+            task['failed_count'] = extra.get('failed_count')
+            if extra.get('title'):
+                task['filename'] = extra['title']
+
+    def _download():
+        try:
+            crawler = ImageGalleryCrawler(proxy=proxy)
+            result = run_async(crawler.download_gallery(gallery_url, output_dir, _progress))
+            task = download_tasks[task_id]
+            task['filename'] = result['filename']
+            task['output_path'] = result['output_path']
+            task['video_info'] = {'title': result['title'], 'cover': '', 'actresses': [], 'tags': [], 'code': '', 'source_url': gallery_url}
+            task['detail'] = f"已下载 {result['image_count']} 张图片"
+            cache_src_path = result.get('output_path', '')
+
+            if download_mode == 'novel':
+                task['phase'] = 'importing'
+                task['phaseTitle'] = _phase_title('importing')
+                task['detail'] = '正在导入 Novel 图集库...'
+                import_result = import_images_to_novel(novel_project_path, result['title'], result['image_paths'])
+                if not import_result.get('success'):
+                    raise RuntimeError(import_result.get('message') or 'Novel 图片入库失败')
+                gallery_id = import_result.get('gallery_id')
+                task['gallery_id'] = gallery_id
+                task['detail'] = import_result.get('message', '图片入库完成')
+                novel_img_dir = os.path.join(novel_project_path, 'img', 'gallery_images', str(gallery_id))
+                task['output_path'] = novel_img_dir
+                result['output_path'] = novel_img_dir
+                import shutil
+                try:
+                    gallery_dir = Path(cache_src_path)
+                    if gallery_dir.exists() and gallery_dir.parent.name in ('gallery-cache', 'gallery_images'):
+                        shutil.rmtree(gallery_dir, ignore_errors=True)
+                        print(f"[Gallery] 清理缓存目录: {gallery_dir}")
+                except Exception as cleanup_err:
+                    print(f"[Gallery] 缓存清理跳过: {cleanup_err}")
+
+            task['status'] = 'completed'
+            task['progress'] = 100
+            _save_gallery_to_history(task_id, result, download_mode)
+        except Exception as e:
+            download_tasks[task_id]['status'] = 'error'
+            download_tasks[task_id]['error'] = str(e)
+
+    threading.Thread(target=_download, daemon=True).start()
+    return jsonify({'task_id': task_id, 'filename': '解析中...', 'status': 'downloading', 'downloadMode': download_mode, 'source': 'gallery'})
+
 # ----- Common helpers -----
 
 def _save_to_history(task_id, video_info, filename, output_path, mode, source):
@@ -292,6 +405,22 @@ def _save_to_history(task_id, video_info, filename, output_path, mode, source):
         save_history(history[:200])
     except Exception as e:
         print(f"History save failed: {e}")
+
+def _save_gallery_to_history(task_id, result, mode):
+    record = {
+        'id': task_id, 'title': result.get('title', ''), 'filename': result.get('filename', ''),
+        'cover': '', 'actresses': [], 'tags': ['gallery'], 'code': '',
+        'outputPath': result.get('output_path', ''),
+        'fileSize': f"{result.get('image_count', 0)} 张图片",
+        'downloadedAt': int(time.time() * 1000),
+        'downloadMode': mode, 'source': 'gallery',
+    }
+    try:
+        history = load_history()
+        history.insert(0, record)
+        save_history(history[:200])
+    except Exception as e:
+        print(f"Gallery history save failed: {e}")
 
 @app.route('/api/download-status/<task_id>', methods=['GET'])
 def get_download_status(task_id):

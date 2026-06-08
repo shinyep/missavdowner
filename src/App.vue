@@ -6,6 +6,7 @@
     <!-- Main Content -->
     <main class="flex-1 flex overflow-hidden">
       <DownloadView v-show="currentTab === 'download'" />
+      <GalleryView v-show="currentTab === 'gallery'" />
       <HistoryView v-show="currentTab === 'history'" :active="currentTab === 'history'" />
       <SettingsView v-show="currentTab === 'settings'" />
       <AboutView v-show="currentTab === 'about'" />
@@ -17,6 +18,7 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import Header from './components/Header.vue'
 import DownloadView from './components/DownloadView.vue'
+import GalleryView from './components/GalleryView.vue'
 import HistoryView from './components/HistoryView.vue'
 import SettingsView from './components/SettingsView.vue'
 import AboutView from './components/AboutView.vue'

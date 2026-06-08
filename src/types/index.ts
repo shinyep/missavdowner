@@ -1,4 +1,4 @@
-export type TabType = 'download' | 'history' | 'settings' | 'about'
+﻿export type TabType = 'download' | 'gallery' | 'history' | 'settings' | 'about'
 
 export interface VideoInfo {
   title: string
@@ -9,6 +9,13 @@ export interface VideoInfo {
   code: string
   release_date: string
   duration: string
+}
+
+export interface GalleryParseResult {
+  title: string
+  page_url: string
+  image_count: number
+  image_urls: string[]
 }
 
 export interface DownloadTask {
@@ -24,7 +31,7 @@ export interface DownloadTask {
   error?: string
   createdAt: number
   /** 当前阶段（动作） */
-  phase?: 'download_segments' | 'merging' | 'importing' | 'transcoding' | 'cleaning'
+  phase?: 'parsing' | 'downloading' | 'download_segments' | 'merging' | 'importing' | 'transcoding' | 'cleaning'
   /** 阶段中文描述 */
   phaseTitle?: string
   /** 额外详情，如临时目录路径 */
@@ -35,6 +42,14 @@ export interface DownloadTask {
   downloadMode?: 'local' | 'novel'
   /** Novel 入库的视频 ID，用于重新转码 */
   novelVideoId?: number
+  /** 图集总图片数 */
+  totalImages?: number
+  /** 当前正在下载第几张 */
+  currentIndex?: number
+  /** 下载成功数 */
+  successCount?: number
+  /** 下载失败数 */
+  failedCount?: number
 }
 
 export interface HistoryRecord {
@@ -103,6 +118,10 @@ export interface ElectronAPI {
     retryTranscode: (options: { videoId: number; novelProjectPath?: string }) => Promise<{ id: string; status: string; progress: number }>
     cancelDownload: (taskId: string) => Promise<void>
   }
+  gallery: {
+    parse: (options: { galleryUrl: string; proxy?: string }) => Promise<GalleryParseResult>
+    download: (options: { galleryUrl: string; outputDir: string; downloadMode?: 'local' | 'novel'; novelProjectPath?: string; proxy?: string }) => Promise<DownloadTask>
+  }
   onDownloadProgress: (callback: (data: {
     taskId: string
     progress: number
@@ -111,9 +130,14 @@ export interface ElectronAPI {
     phase?: DownloadTask['phase']
     phaseTitle?: string
     detail?: string
+    outputPath?: string
     transcodeProgress?: number
+    totalImages?: number
+    currentIndex?: number
+    successCount?: number
+    failedCount?: number
   }) => void) => () => void
-  onDownloadCompleted: (callback: (data: { taskId: string; filename: string }) => void) => () => void
+  onDownloadCompleted: (callback: (data: { taskId: string; filename: string; outputPath?: string }) => void) => () => void
   onDownloadError: (callback: (data: { taskId: string; error: string }) => void) => () => void
   history: {
     get: () => Promise<HistoryRecord[]>
