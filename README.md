@@ -37,10 +37,10 @@
 
 ### Python 依赖安装
 
-\\\ash
+`
 pip install playwright httpx beautifulsoup4 flask flask-cors Pillow
 playwright install chromium
-\\\
+`
 
 ## 安装使用
 
@@ -50,14 +50,14 @@ playwright install chromium
 
 ### 从源码运行
 
-\\\ash
+`
 git clone https://github.com/shinyep/missavdowner.git
 cd videodown
 npm install
 pip install -r python/requirements.txt
 playwright install chromium
 npm run dev
-\\\
+`
 
 ## 使用方法
 
@@ -77,7 +77,7 @@ npm run dev
 
 ## 项目结构
 
-\\\
+`
 videodown/
 ├── electron/              # Electron 主进程
 │   ├── main.ts           # 主进程入口 + IPC 处理
@@ -97,15 +97,15 @@ videodown/
 ├── resources/            # 资源文件
 │   └── ffmpeg.exe        # FFmpeg 可执行文件
 └── package.json
-\\\
+`
 
 ## 开发
 
-\\\ash
+`
 npm run dev          # 开发模式
 npm run build        # 构建打包
 npx vue-tsc --noEmit # 类型检查
-\\\
+`
 
 ## 注意事项
 
