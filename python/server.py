@@ -1,70 +1,80 @@
 """
-Flask HTTP 服务器
-提供 API 接口供 Electron 调用
+Flask HTTP server - provides API for Electron app.
+Supports missav.ws and kissjav.com
 """
 import asyncio
 import json
 import os
+import re
+import sys
 import threading
 import time
 import uuid
 from pathlib import Path
-from datetime import datetime
+from urllib.parse import urlparse
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-from crawler import crawler, downloader
+from crawler import crawler as missav_crawler, downloader as missav_downloader
+
+from novel_import import import_video_to_novel
+
+# Optional kissjav support
+try:
+    from kissjav_crawler import kissjav_crawler, kissjav_downloader
+    _kissjav_available = True
+except ImportError as e:
+    print(f"[Server] kissjav_crawler not found: {e}")
+    kissjav_crawler = kissjav_downloader = None
+    _kissjav_available = False
+
+# Force UTF-8 stdout
+try:
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
 
 app = Flask(__name__)
 CORS(app)
 
-# 下载任务存储
 download_tasks: dict[str, dict] = {}
 
-# 历史记录文件 - 使用用户主目录下的 .missav 目录
+# ----- History -----
 def get_history_file():
-    """获取历史记录文件路径"""
-    # 优先使用环境变量指定的路径
-    history_dir = os.environ.get('MISSAV_HISTORY_DIR')
-    if history_dir:
-        history_path = Path(history_dir)
-    else:
-        # 使用用户主目录
-        history_path = Path.home() / '.missav'
-    history_path.mkdir(parents=True, exist_ok=True)
-    return history_path / 'history.json'
+    d = os.environ.get('MISSAV_HISTORY_DIR')
+    p = Path(d) if d else Path.home() / '.missav'
+    p.mkdir(parents=True, exist_ok=True)
+    return p / 'history.json'
 
-HISTORY_FILE = None  # 延迟初始化
+HISTORY_FILE = None
 
-
-def load_history() -> list[dict]:
-    """加载历史记录"""
+def load_history():
     global HISTORY_FILE
     if HISTORY_FILE is None:
         HISTORY_FILE = get_history_file()
     if HISTORY_FILE.exists():
         try:
-            with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
+            return json.loads(HISTORY_FILE.read_text(encoding='utf-8'))
+        except Exception:
             pass
     return []
 
+def save_history(records):
+    HISTORY_FILE.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding='utf-8')
 
-def save_history(records: list[dict]):
-    """保存历史记录"""
-    with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
-        json.dump(records, f, ensure_ascii=False, indent=2)
+# ----- Utils -----
+def get_crawler_for_url(url: str):
+    hostname = (urlparse(url).hostname or '')
+    if 'kissjav' in hostname:
+        if _kissjav_available:
+            return kissjav_crawler, kissjav_downloader, 'kissjav'
+        raise RuntimeError('kissjav crawler not loaded')
+    return missav_crawler, missav_downloader, 'missav'
 
-
-# 运行异步函数的辅助函数
 def run_async(coro):
-    """在新线程中运行异步函数"""
     loop = asyncio.new_event_loop()
-    result = None
-    exception = None
-
+    result, exception = None, None
     def _run():
         nonlocal result, exception
         try:
@@ -73,637 +83,268 @@ def run_async(coro):
             exception = e
         finally:
             loop.close()
-
-    thread = threading.Thread(target=_run)
-    thread.start()
-    thread.join()
-
+    t = threading.Thread(target=_run)
+    t.start()
+    t.join()
     if exception:
         raise exception
     return result
 
+def _phase_title(phase):
+    return {
+        'download_segments': 'Downloading segments',
+        'downloading': 'Downloading',
+        'merging': 'Merging video',
+        'importing': 'Importing to Novel',
+        'transcoding': 'Transcoding',
+        'cleaning': 'Cleaning temp files',
+    }.get(phase, phase or '')
 
-def _phase_title(phase: str) -> str:
-    """将阶段代码转为中文描述"""
-    titles = {
-        'download_segments': '正在下载视频片段',
-        'merging': '正在合并视频',
-        'importing': '正在入库到数据库',
-        'transcoding': '正在重新编码',
-        'cleaning': '正在清理临时文件',
-    }
-    return titles.get(phase, phase or '')
-
+# ==================== API Routes ====================
 
 @app.route('/api/parse', methods=['POST'])
 def parse_video():
-    """解析视频信息"""
     data = request.get_json()
-    url = data.get('url')
-
+    url = data.get('url', '')
     if not url:
-        return jsonify({'error': 'URL is required'}), 400
-
+        return jsonify({'error': 'URL required'}), 400
     try:
+        crawler, _, source = get_crawler_for_url(url)
+        print(f"[Parse] {source}: {url}")
         result = run_async(crawler.parse_video(url))
+        result['source'] = source
         return jsonify(result)
     except Exception as e:
+        print(f"[Parse] Error: {e}")
         return jsonify({'error': str(e)}), 500
-
 
 @app.route('/api/download', methods=['POST'])
 def start_download():
-    """开始下载视频"""
     data = request.get_json()
-    url = data.get('url')
-    output_dir = data.get('outputDir', '')
+    url = data.get('url', '')
+    output_dir = data.get('outputDir', '') or os.path.expanduser('~\\Downloads')
     max_concurrent = data.get('maxConcurrent', 10)
     proxy = data.get('proxy', '')
     auto_merge = data.get('autoMerge', True)
     keep_temp = data.get('keepTempFiles', False)
 
-    # 应用设置
-    downloader.set_concurrent(max_concurrent)
-    downloader.set_proxy(proxy if proxy else None)
-
     if not url:
-        return jsonify({'error': 'URL is required'}), 400
+        return jsonify({'error': 'URL required'}), 400
+
+    crawler, downloader, source = get_crawler_for_url(url)
+    downloader.set_proxy(proxy if proxy else None)
+    if hasattr(downloader, 'set_concurrent'):
+        downloader.set_concurrent(max_concurrent)
 
     try:
-        # 先解析视频信息
         video_info = run_async(crawler.parse_video(url))
+        if source == 'kissjav' and not video_info.get('video_url'):
+            return jsonify({'error': 'No video URL found'}), 400
+        if source != 'kissjav' and not video_info.get('m3u8_url'):
+            return jsonify({'error': 'No m3u8 URL found'}), 400
 
-        if not video_info.get('m3u8_url'):
-            return jsonify({'error': '无法获取视频下载链接'}), 400
-
-        # 生成任务 ID
         task_id = str(uuid.uuid4())[:8]
-
-        # 生成文件名
         safe_title = "".join(c for c in video_info['title'] if c.isalnum() or c in ' _-').strip()[:50]
         filename = f"{video_info.get('code', '') or safe_title}.mp4"
-        output_path = os.path.join(output_dir, filename)
+        output_path = os.path.abspath(os.path.join(output_dir, filename))
 
-        # 存储任务信息
         download_tasks[task_id] = {
-            'id': task_id,
-            'url': url,
-            'video_info': video_info,
-            'filename': filename,
-            'output_path': output_path,
-            'status': 'downloading',
-            'progress': 0,
-            'speed': '0 MB/s',
-            'phase': 'download_segments',
-            'phaseTitle': _phase_title('download_segments'),
-            'detail': '',
-            'transcodeProgress': 0,
+            'id': task_id, 'url': url, 'video_info': video_info,
+            'filename': filename, 'output_path': output_path,
+            'status': 'downloading', 'progress': 0, 'speed': '0 MB/s',
+            'phase': 'downloading', 'phaseTitle': _phase_title('downloading'),
+            'detail': '', 'transcodeProgress': 0, 'source': source,
         }
 
-        # 在后台线程中开始下载
-        def download_thread():
+        def _progress(progress, speed, phase=None, detail=None):
+            download_tasks[task_id]['progress'] = progress
+            download_tasks[task_id]['speed'] = speed
+            if phase:
+                download_tasks[task_id]['phase'] = phase
+                download_tasks[task_id]['phaseTitle'] = _phase_title(phase)
+            if detail:
+                download_tasks[task_id]['detail'] = detail
+
+        def _download():
             try:
-                def progress_callback(progress, speed, phase=None, detail=None):
-                    download_tasks[task_id]['progress'] = progress
-                    download_tasks[task_id]['speed'] = speed
-                    if phase:
-                        download_tasks[task_id]['phase'] = phase
-                        download_tasks[task_id]['phaseTitle'] = _phase_title(phase)
-                    if detail:
-                        download_tasks[task_id]['detail'] = detail
-
-                result = run_async(downloader.download_video(
-                    video_info['m3u8_url'],
-                    url,
-                    output_path,
-                    progress_callback,
-                    auto_merge=auto_merge,
-                    keep_temp_files=keep_temp
-                ))
-
+                if source == 'kissjav':
+                    run_async(downloader.download_video(video_info['video_url'], 'https://kissjav.com/', output_path, _progress))
+                else:
+                    run_async(downloader.download_video(video_info['m3u8_url'], url, output_path,
+                        auto_merge=auto_merge, keep_temp_files=keep_temp, progress_callback=_progress))
                 download_tasks[task_id]['status'] = 'completed'
                 download_tasks[task_id]['progress'] = 100
-                download_tasks[task_id]['phase'] = None
-                download_tasks[task_id]['phaseTitle'] = ''
-
-                # 保存到历史记录
-                history = load_history()
-                history.insert(0, {
-                    'id': task_id,
-                    'title': video_info['title'],
-                    'filename': filename,
-                    'cover': video_info.get('cover', ''),
-                    'actresses': video_info.get('actresses', []),
-                    'tags': video_info.get('tags', []),
-                    'code': video_info.get('code', ''),
-                    'outputPath': output_path,
-                    'fileSize': f"{os.path.getsize(output_path) / (1024*1024):.1f} MB" if os.path.exists(output_path) else '',
-                    'downloadedAt': int(datetime.now().timestamp() * 1000)
-                })
-                save_history(history)
-
+                # Keep phase info visible after completion
+                _save_to_history(task_id, video_info, filename, output_path, 'local', source)
             except Exception as e:
                 download_tasks[task_id]['status'] = 'error'
                 download_tasks[task_id]['error'] = str(e)
-                print(f"下载失败: {e}")
 
-        thread = threading.Thread(target=download_thread, daemon=True)
-        thread.start()
-
-        return jsonify({
-            'task_id': task_id,
-            'filename': filename,
-            'status': 'downloading'
-        })
-
+        threading.Thread(target=_download, daemon=True).start()
+        return jsonify({'task_id': task_id, 'filename': filename, 'status': 'downloading', 'source': source})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/download-to-novel', methods=['POST'])
+def start_download_to_novel():
+    data = request.get_json()
+    url = data.get('url', '')
+    output_dir = data.get('outputDir', '') or os.path.expanduser('~\\Downloads')
+    max_concurrent = data.get('maxConcurrent', 10)
+    proxy = data.get('proxy', '')
+    auto_merge = data.get('autoMerge', True)
+    keep_temp = data.get('keepTempFiles', False)
+    novel_project_path = data.get('novelProjectPath', '')
 
-@app.route('/api/progress/<task_id>')
-def get_progress(task_id: str):
-    """获取下载进度"""
+    if not url:
+        return jsonify({'error': 'URL required'}), 400
+    if not novel_project_path:
+        return jsonify({'error': 'Novel project path required'}), 400
+
+    crawler, downloader, source = get_crawler_for_url(url)
+    downloader.set_proxy(proxy if proxy else None)
+    if hasattr(downloader, 'set_concurrent'):
+        downloader.set_concurrent(max_concurrent)
+
+    try:
+        video_info = run_async(crawler.parse_video(url))
+        if source == 'kissjav' and not video_info.get('video_url'):
+            return jsonify({'error': 'No video URL found'}), 400
+        if source != 'kissjav' and not video_info.get('m3u8_url'):
+            return jsonify({'error': 'No m3u8 URL found'}), 400
+
+        task_id = str(uuid.uuid4())[:8]
+        safe_title = "".join(c for c in video_info['title'] if c.isalnum() or c in ' _-').strip()[:50]
+        filename = f"{video_info.get('code', '') or safe_title}.mp4"
+        output_path = os.path.abspath(os.path.join(output_dir, filename))
+
+        download_tasks[task_id] = {
+            'id': task_id, 'url': url, 'video_info': video_info,
+            'filename': filename, 'output_path': output_path,
+            'status': 'downloading', 'progress': 0, 'speed': '0 MB/s',
+            'phase': 'downloading', 'phaseTitle': _phase_title('downloading'),
+            'detail': '', 'transcodeProgress': 0,
+            'downloadMode': 'novel', 'source': source,
+        }
+
+        def _progress(progress, speed, phase=None, detail=None):
+            download_tasks[task_id]['progress'] = progress
+            download_tasks[task_id]['speed'] = speed
+            if phase:
+                download_tasks[task_id]['phase'] = phase
+                download_tasks[task_id]['phaseTitle'] = _phase_title(phase)
+            if detail:
+                download_tasks[task_id]['detail'] = detail
+
+        def _dl():
+            try:
+                if source == 'kissjav':
+                    run_async(downloader.download_video(video_info['video_url'], 'https://kissjav.com/', output_path, _progress))
+                else:
+                    run_async(downloader.download_video(video_info['m3u8_url'], url, output_path,
+                        auto_merge=auto_merge, keep_temp_files=keep_temp, progress_callback=_progress))
+
+                download_tasks[task_id]['progress'] = 100
+
+                # Import to Novel
+                print(f'[Novel] Importing: {filename}')
+                download_tasks[task_id]['phase'] = 'importing'
+                download_tasks[task_id]['phaseTitle'] = _phase_title('importing')
+                download_tasks[task_id]['detail'] = 'Importing...'
+                try:
+                    cover = video_info.get('cover', '')
+                    result = import_video_to_novel(novel_project_path, output_path, safe_title, cover_url=cover)
+                    if result['success']:
+                        download_tasks[task_id]['novel_video_id'] = result.get('video_id')
+                        download_tasks[task_id]['detail'] = result['message']
+                    else:
+                        download_tasks[task_id]['detail'] = result['message'] + (' stdout=' + result.get('stdout','')[:80] if result.get('stdout') else '')
+                except Exception as _e:
+                    download_tasks[task_id]['detail'] = f'Import error: {str(_e)[:200]}'
+
+                download_tasks[task_id]['status'] = 'completed'
+                _save_to_history(task_id, video_info, filename, output_path, 'novel', source)
+            except Exception as e:
+                download_tasks[task_id]['status'] = 'error'
+                download_tasks[task_id]['error'] = str(e)
+
+        threading.Thread(target=_dl, daemon=True).start()
+        return jsonify({'task_id': task_id, 'filename': filename, 'status': 'downloading', 'downloadMode': 'novel', 'source': source})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# ----- Common helpers -----
+
+def _save_to_history(task_id, video_info, filename, output_path, mode, source):
+    record = {
+        'id': task_id, 'title': video_info['title'], 'filename': filename,
+        'cover': video_info.get('cover', ''),
+        'actresses': video_info.get('actresses', []),
+        'tags': video_info.get('tags', []),
+        'code': video_info.get('code', ''),
+        'outputPath': output_path,
+        'downloadedAt': int(time.time() * 1000),
+        'downloadMode': mode, 'source': source,
+    }
+    try:
+        history = load_history()
+        history.insert(0, record)
+        save_history(history[:200])
+    except Exception as e:
+        print(f"History save failed: {e}")
+
+@app.route('/api/download-status/<task_id>', methods=['GET'])
+def get_download_status(task_id):
     task = download_tasks.get(task_id)
     if not task:
         return jsonify({'error': 'Task not found'}), 404
+    return jsonify(task)
 
-    return jsonify({
-        'taskId': task_id,
-        'progress': task['progress'],
-        'speed': task['speed'],
-        'status': task['status'],
-        'error': task.get('error'),
-        'phase': task.get('phase'),
-        'phaseTitle': task.get('phaseTitle', ''),
-        'detail': task.get('detail', ''),
-        'transcodeProgress': task.get('transcodeProgress', 0),
-        'novelVideoId': task.get('novel_video_id'),
-    })
+@app.route('/api/pause-download/<task_id>', methods=['POST'])
+def pause_download(task_id):
+    task = download_tasks.get(task_id)
+    if not task:
+        return jsonify({'error': 'Task not found'}), 404
+    source = task.get('source', 'missav')
+    d = kissjav_downloader if (source == 'kissjav' and _kissjav_available) else missav_downloader
+    d.pause_task(task_id)
+    task['status'] = 'paused'
+    return jsonify({'status': 'paused'})
 
+@app.route('/api/resume-download/<task_id>', methods=['POST'])
+def resume_download(task_id):
+    task = download_tasks.get(task_id)
+    if not task:
+        return jsonify({'error': 'Task not found'}), 404
+    source = task.get('source', 'missav')
+    d = kissjav_downloader if (source == 'kissjav' and _kissjav_available) else missav_downloader
+    d.resume_task(task_id)
+    task['status'] = 'downloading'
+    return jsonify({'status': 'downloading'})
 
-@app.route('/api/pause/<task_id>', methods=['POST'])
-def pause_download(task_id: str):
-    """暂停下载"""
-    downloader.pause_task(task_id)
-    if task_id in download_tasks:
-        download_tasks[task_id]['status'] = 'paused'
-    return jsonify({'success': True})
-
-
-@app.route('/api/resume/<task_id>', methods=['POST'])
-def resume_download(task_id: str):
-    """恢复下载"""
-    downloader.resume_task(task_id)
-    if task_id in download_tasks:
-        download_tasks[task_id]['status'] = 'downloading'
-    return jsonify({'success': True})
-
-
-@app.route('/api/history')
+@app.route('/api/history', methods=['GET'])
 def get_history():
-    """获取历史记录"""
-    records = load_history()
-    return jsonify({'records': records})
-
+    return jsonify(load_history())
 
 @app.route('/api/history/<record_id>', methods=['DELETE'])
-def delete_history(record_id: str):
-    """删除历史记录"""
+def delete_history(record_id):
     history = load_history()
-    history = [r for r in history if r['id'] != record_id]
-    save_history(history)
+    save_history([r for r in history if r.get('id') != record_id])
     return jsonify({'success': True})
-
 
 @app.route('/api/history', methods=['DELETE'])
 def clear_history():
-    """清空历史记录"""
     save_history([])
     return jsonify({'success': True})
 
-
-@app.route('/health')
+@app.route('/api/health', methods=['GET'])
 def health():
-    """健康检查"""
-    return jsonify({'status': 'ok'})
-
-@app.route('/api/download-to-novel', methods=['POST'])
-def download_to_novel():
-    """下载视频并入库到 Novel 项目"""
-    data = request.get_json()
-    url = data.get('url')
-    novel_project_path = data.get('novelProjectPath', 'F:\\novel')
-    max_concurrent = data.get('maxConcurrent', 10)
-    proxy = data.get('proxy', '')
-    auto_merge = data.get('autoMerge', True)
-    keep_temp = data.get('keepTempFiles', False)
-
-    downloader.set_concurrent(max_concurrent)
-    downloader.set_proxy(proxy if proxy else None)
-
-    if not url:
-        return jsonify({'error': 'URL is required'}), 400
-
-    try:
-        video_info = run_async(crawler.parse_video(url))
-        if not video_info.get('m3u8_url'):
-            return jsonify({'error': '无法获取视频下载链接'}), 400
-
-        task_id = str(uuid.uuid4())[:8]
-        safe_title = "".join(c for c in video_info['title'] if c.isalnum() or c in ' _-').strip()[:50]
-        filename = f"{video_info.get('code', '') or safe_title}.mp4"
-
-        # Novel 项目路径
-        novel_backend = os.path.join(novel_project_path, 'backend')
-        novel_venv_python = os.path.join(novel_backend, 'venv', 'Scripts', 'python.exe')
-        novel_media_root = os.path.join(novel_project_path, 'img')
-        temp_dir = os.path.join(novel_media_root, 'temp_videos')
-        os.makedirs(temp_dir, exist_ok=True)
-        output_path = os.path.join(temp_dir, filename)
-
-        download_tasks[task_id] = {
-            'id': task_id,
-            'url': url,
-            'video_info': video_info,
-            'filename': filename,
-            'output_path': output_path,
-            'status': 'downloading',
-            'progress': 0,
-            'speed': '0 MB/s',
-            'downloadMode': 'novel',
-            'phase': 'download_segments',
-            'phaseTitle': _phase_title('download_segments'),
-            'detail': f'临时目录: {temp_dir}',
-            'transcodeProgress': 0,
-        }
-
-        def download_thread():
-            import subprocess as _sp
-            try:
-                video_id = None
-                gallery_id = None
-                def progress_callback(progress, speed, phase=None, detail=None):
-                    download_tasks[task_id]['progress'] = progress
-                    download_tasks[task_id]['speed'] = speed
-                    if phase:
-                        download_tasks[task_id]['phase'] = phase
-                        download_tasks[task_id]['phaseTitle'] = _phase_title(phase)
-                    if detail:
-                        download_tasks[task_id]['detail'] = detail
-
-                # 下载视频到 Novel 的 temp_videos 目录
-                run_async(downloader.download_video(
-                    video_info['m3u8_url'], url, output_path, progress_callback,
-                    auto_merge=auto_merge, keep_temp_files=keep_temp
-                ))
-
-                # 切换到入库阶段
-                download_tasks[task_id]['phase'] = 'importing'
-                download_tasks[task_id]['phaseTitle'] = _phase_title('importing')
-                download_tasks[task_id]['speed'] = '入库中...'
-                download_tasks[task_id]['detail'] = '正在创建 Gallery 和 GalleryVideo'
-                print(f"[Novel] 下载完成，开始入库: {filename}")
-
-                # 步骤1: 创建 Gallery + GalleryVideo
-                import_script = (
-                    "import os, sys\n"
-                    "os.environ['DJANGO_SETTINGS_MODULE'] = 'novel_project.settings'\n"
-                    "sys.path.insert(0, " + repr(novel_backend) + ")\n"
-                    "import django\n"
-                    "django.setup()\n"
-                    "from api.models import Gallery, GalleryVideo\n"
-                    "from django.core.files import File\n"
-                    "video_path = " + repr(output_path) + "\n"
-                    "gallery_title = " + repr(video_info['title']) + "\n"
-                    "video_caption = " + repr(filename) + "\n"
-                    "gallery, created = Gallery.objects.get_or_create(title=gallery_title, defaults={'cover_image': None})\n"
-                    "print(f'Gallery ID: {gallery.id}, created={created}')\n"
-                    "with open(video_path, 'rb') as f:\n"
-                    "    django_file = File(f, name=video_caption)\n"
-                    "    video = GalleryVideo.objects.create(gallery=gallery, video_file=django_file, caption=video_caption, order=0)\n"
-                    "print(f'GalleryVideo ID: {video.id}')\n"
-                    "print(f'VIDEO_ID={video.id}')\n"
-                )
-
-                result = _sp.run(
-                    [novel_venv_python, '-c', import_script],
-                    capture_output=True, text=True, timeout=120,
-                    cwd=novel_backend,
-                    env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}
-                )
-
-                print(f"[Novel] import stdout: {result.stdout}")
-                if result.stderr:
-                    print(f"[Novel] import stderr: {result.stderr}")
-
-                if result.returncode != 0:
-                    raise Exception(f"入库脚本失败: {result.stderr}")
-
-                video_id = None
-                for line in result.stdout.strip().split('\n'):
-                    if line.startswith('VIDEO_ID='):
-                        video_id = int(line.split('=', 1)[1])
-                        break
-
-                if not video_id:
-                    raise Exception(f"无法解析 video_id: {result.stdout}")
-
-                gallery_id = None
-                for line in result.stdout.strip().split('\n'):
-                    if 'Gallery ID:' in line:
-                        import re as _re
-                        m = _re.search(r'Gallery ID: (\d+)', line)
-                        if m:
-                            gallery_id = int(m.group(1))
-                            break
-                print(f"[Novel] video_id={video_id}, gallery_id={gallery_id}")
-
-                # 切换到转码阶段
-                print(f"[Novel] video_id={video_id}，开始重新编码...")
-                download_tasks[task_id]['phase'] = 'transcoding'
-                download_tasks[task_id]['phaseTitle'] = _phase_title('transcoding')
-                download_tasks[task_id]['speed'] = '转码中...'
-                download_tasks[task_id]['detail'] = f'video_id={video_id}'
-
-                # 步骤2: 使用 Popen 启动 process_videos，轮询 DB 获取进度
-                encode_cmd = [novel_venv_python, 'manage.py', 'process_videos', '--video_id', str(video_id)]
-                print(f"[Novel] 启动转码: {' '.join(encode_cmd)}")
-                encode_proc = _sp.Popen(
-                    encode_cmd,
-                    stdout=_sp.DEVNULL, stderr=_sp.PIPE, text=True,
-                    cwd=novel_backend,
-                    env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}
-                )
-
-                # 检查进程是否立即失败
-                time.sleep(2)
-                if encode_proc.poll() is not None:
-                    _, early_err = encode_proc.communicate(timeout=5)
-                    raise Exception(f"process_videos 启动失败: {early_err}")
-
-                # 轮询数据库进度
-                # 初始进度更新
-                download_tasks[task_id]['detail'] = '转码进程已启动，等待处理...'
-                poll_script = (
-                    "import os, sys\n"
-                    "os.environ['DJANGO_SETTINGS_MODULE'] = 'novel_project.settings'\n"
-                    "sys.path.insert(0, " + repr(novel_backend) + ")\n"
-                    "import django\n"
-                    "django.setup()\n"
-                    "from api.models import GalleryVideo\n"
-                    f"v = GalleryVideo.objects.get(id={video_id})\n"
-                    "print(f'PROGRESS={v.progress}')\n"
-                    "print(f'STATUS={v.status}')\n"
-                )
-
-                prev_progress = 0
-                transcode_ok = True
-                poll_count = 0
-                while encode_proc.poll() is None and poll_count < 3600:
-                    try:
-                        poll_result = _sp.run(
-                            [novel_venv_python, '-c', poll_script],
-                            capture_output=True, text=True, timeout=5,
-                            cwd=novel_backend,
-                            env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}
-                        )
-                        for line in poll_result.stdout.strip().split('\n'):
-                            if line.startswith('PROGRESS='):
-                                prog = int(line.split('=', 1)[1])
-                                if prog > prev_progress:
-                                    prev_progress = prog
-                                    download_tasks[task_id]['transcodeProgress'] = prog
-                                    if prog >= 10:
-                                        download_tasks[task_id]['detail'] = f'正在生成缩略图...'
-                                    if prog >= 20:
-                                        download_tasks[task_id]['detail'] = f'正在优化视频...'
-                                    if prog >= 30:
-                                        download_tasks[task_id]['detail'] = f'正在生成 HLS 流...'
-                            if line.startswith('STATUS='):
-                                status = line.split('=', 1)[1]
-                                if status == 'completed':
-                                    download_tasks[task_id]['transcodeProgress'] = 100
-                                    download_tasks[task_id]['detail'] = '转码完成'
-                                    print(f"[Novel] 转码完成! video_id={video_id}")
-                                    # 等待进程退出
-                                    encode_proc.wait(timeout=10)
-                                    break
-                                elif status == 'failed':
-                                    download_tasks[task_id]['detail'] = '转码失败，请检查视频文件'
-                                    print(f"[Novel] 转码失败! video_id={video_id}")
-                                    encode_proc.kill()
-                                    transcode_ok = False
-                                    break
-                                elif status == 'processing' and prev_progress == 0:
-                                    download_tasks[task_id]['detail'] = '正在转码...'
-                    except Exception as poll_err:
-                        print(f"[Novel] 进度轮询异常: {poll_err}")
-                    time.sleep(2)
-                    poll_count += 1
-
-                if not transcode_ok:
-                    raise Exception(f"转码失败 (video_id={video_id})")
-
-                encode_stdout, encode_stderr = encode_proc.communicate(timeout=60)
-
-                if encode_stderr:
-                    print(f"[Novel] encode stderr: {encode_stderr}")
-
-                if encode_proc.returncode != 0:
-                    print(f"[Novel] 转码警告 (exit {encode_proc.returncode}): {encode_stderr}")
-
-                # 步骤3: 设置 Gallery 封面（从视频缩略图创建 GalleryImage）
-                download_tasks[task_id]['detail'] = '正在设置封面缩略图...'
-                cover_script = (
-                    "import os, sys\n"
-                    "os.environ['DJANGO_SETTINGS_MODULE'] = 'novel_project.settings'\n"
-                    "sys.path.insert(0, " + repr(novel_backend) + ")\n"
-                    "import django\n"
-                    "django.setup()\n"
-                    "from api.models import Gallery, GalleryVideo, GalleryImage\n"
-                    "from django.core.files import File\n"
-                    f"video = GalleryVideo.objects.get(id={video_id})\n"
-                    "gallery = video.gallery\n"
-                    "if not gallery.cover_image and video.thumbnail:\n"
-                    "    thumb_path = video.thumbnail.path\n"
-                    "    with open(thumb_path, 'rb') as f:\n"
-                    "        image = GalleryImage.objects.create(\n"
-                    "            gallery=gallery, image=File(f, name=os.path.basename(thumb_path)), caption='视频缩略图', order=0\n"
-                    "        )\n"
-                    "    gallery.cover_image = image\n"
-                    "    gallery.save(update_fields=['cover_image'])\n"
-                    "    print(f'Cover set: GalleryImage ID={image.id}')\n"
-                    "else:\n"
-                    "    print('Cover already set or no thumbnail')\n"
-                )
-
-                cover_result = _sp.run(
-                    [novel_venv_python, '-c', cover_script],
-                    capture_output=True, text=True, timeout=30,
-                    cwd=novel_backend,
-                    env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}
-                )
-                print(f"[Novel] cover stdout: {cover_result.stdout}")
-                if cover_result.stderr:
-                    print(f"[Novel] cover stderr: {cover_result.stderr}")
-
-                # 切换到清理阶段
-                download_tasks[task_id]['phase'] = 'cleaning'
-                download_tasks[task_id]['phaseTitle'] = _phase_title('cleaning')
-                download_tasks[task_id]['detail'] = '正在删除临时文件'
-
-                if os.path.exists(output_path):
-                    try:
-                        os.remove(output_path)
-                        print(f"[Novel] 已清理临时文件: {output_path}")
-                    except Exception:
-                        pass
-
-                download_tasks[task_id]['status'] = 'completed'
-                download_tasks[task_id]['transcodeProgress'] = 100
-                download_tasks[task_id]['phase'] = None
-                download_tasks[task_id]['phaseTitle'] = ''
-                download_tasks[task_id]['novel_video_id'] = video_id
-                print(f"[Novel] 入库完成! video_id={video_id}")
-
-                # 保存到历史记录
-                history = load_history()
-                history.insert(0, {
-                    'id': task_id,
-                    'title': video_info['title'],
-                    'filename': filename,
-                    'cover': video_info.get('cover', ''),
-                    'actresses': video_info.get('actresses', []),
-                    'tags': video_info.get('tags', []),
-                    'code': video_info.get('code', ''),
-                    'outputPath': f'Novel DB video_id={video_id}',
-                    'fileSize': '',
-                    'downloadedAt': int(datetime.now().timestamp() * 1000),
-                    'downloadMode': 'novel',
-                    'novelVideoId': video_id,
-                })
-                save_history(history)
-
-            except Exception as e:
-                download_tasks[task_id]['status'] = 'error'
-                download_tasks[task_id]['error'] = str(e)
-                print(f"[Novel] 入库失败: {e}")
-
-                # 清理临时文件
-                if os.path.exists(output_path):
-                    try:
-                        os.remove(output_path)
-                        print(f"[Novel] 已清理临时文件: {output_path}")
-                    except Exception as ex:
-                        print(f"[Novel] 清理临时文件失败: {ex}")
-
-                # 清理数据库残留 (GalleryVideo + 空 Gallery)
-                if video_id:
-                    cleanup_script = (
-                        "import os, sys\n"
-                        "os.environ['DJANGO_SETTINGS_MODULE'] = 'novel_project.settings'\n"
-                        "sys.path.insert(0, " + repr(novel_backend) + ")\n"
-                        "import django\n"
-                        "django.setup()\n"
-                        "from api.models import GalleryVideo, Gallery\n"
-                        f"try: video = GalleryVideo.objects.get(id={video_id}); gallery = video.gallery; video.delete(); print('DELETED_VIDEO'); " +
-                        f"print(f'Gallery {gallery.id} video_count=' + str(gallery.galleryvideo_set.count())); " +
-                        "if gallery.galleryvideo_set.count() == 0: gallery.delete(); print('DELETED_GALLERY')\n"
-                        "except Exception as ex: print(f'DELETE_ERR: {ex}')\n"
-                        "else: print('CLEANUP_DONE')\n"
-                    )
-                    try:
-                        cr = _sp.run(
-                            [novel_venv_python, '-c', cleanup_script],
-                            capture_output=True, text=True, timeout=15,
-                            cwd=novel_backend,
-                            env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}
-                        )
-                        print(f"[Novel] 清理结果: {cr.stdout.strip()}")
-                        if cr.stderr:
-                            print(f"[Novel] 清理 stderr: {cr.stderr}")
-                    except Exception as ex:
-                        print(f"[Novel] 数据库清理失败: {ex}")
-
-        thread = threading.Thread(target=download_thread, daemon=True)
-        thread.start()
-
-        return jsonify({
-            'task_id': task_id,
-            'filename': filename,
-            'status': 'downloading',
-            'downloadMode': 'novel'
-        })
-
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-
-@app.route('/api/retry-transcode/<int:video_id>', methods=['POST'])
-def retry_transcode(video_id: int):
-    """重试转码指定的视频"""
-    import subprocess as _sp, time as _time
-    data = request.get_json() or {}
-    novel_project_path = data.get('novelProjectPath', 'F:\\novel')
-    novel_backend = os.path.join(novel_project_path, 'backend')
-    novel_venv_python = os.path.join(novel_backend, 'venv', 'Scripts', 'python.exe')
-    if not os.path.exists(novel_venv_python):
-        return jsonify({'error': f'Python 不存在: {novel_venv_python}'}), 400
-    task_id = str(uuid.uuid4())[:8]
-    download_tasks[task_id] = {
-        'id': task_id, 'status': 'downloading', 'progress': 0, 'speed': '转码中...',
-        'phase': 'transcoding', 'phaseTitle': _phase_title('transcoding'),
-        'detail': f'video_id={video_id}', 'transcodeProgress': 0,
-        'downloadMode': 'novel', 'novel_video_id': video_id,
-    }
-    def retry_thread():
-        try:
-            encode_cmd = [novel_venv_python, 'manage.py', 'process_videos', '--video_id', str(video_id)]
-            print(f"[Retry] 转码: {' '.join(encode_cmd)}")
-            encode_proc = _sp.Popen(encode_cmd, stdout=_sp.DEVNULL, stderr=_sp.PIPE, text=True, cwd=novel_backend, env={**os.environ, 'PYTHONIOENCODING': 'utf-8'})
-            _time.sleep(2)
-            if encode_proc.poll() is not None:
-                _, err = encode_proc.communicate(timeout=5)
-                raise Exception(f"process_videos 启动失败: {err}")
-            poll = ("import os,sys\nos.environ['DJANGO_SETTINGS_MODULE']='novel_project.settings'\n" f"sys.path.insert(0,{repr(novel_backend)})\nimport django\ndjango.setup()\nfrom api.models import GalleryVideo\n" f"v=GalleryVideo.objects.get(id={video_id})\nprint(f'PROGRESS={{v.progress}}')\nprint(f'STATUS={{v.status}}')")
-            prev = 0
-            while encode_proc.poll() is None:
-                try:
-                    pr = _sp.run([novel_venv_python, '-c', poll], capture_output=True, text=True, timeout=5, cwd=novel_backend)
-                    for l in pr.stdout.strip().split('\n'):
-                        if l.startswith('PROGRESS='):
-                            p = int(l.split('=', 1)[1])
-                            if p > prev: prev = p; download_tasks[task_id]['transcodeProgress'] = p
-                        if l.startswith('STATUS='):
-                            s = l.split('=', 1)[1]
-                            if s == 'completed':
-                                download_tasks[task_id]['status'] = 'completed'
-                                download_tasks[task_id]['transcodeProgress'] = 100
-                                download_tasks[task_id]['detail'] = '转码完成'
-                                return
-                            elif s == 'failed': raise Exception('转码失败')
-                except Exception as pe:
-                    if '转码失败' in str(pe): raise
-                    print(f"[Retry] 轮询异常: {pe}")
-                _time.sleep(2)
-            encode_proc.wait(timeout=10)
-            download_tasks[task_id]['status'] = 'completed'
-            download_tasks[task_id]['transcodeProgress'] = 100
-        except Exception as e:
-            download_tasks[task_id]['status'] = 'error'
-            download_tasks[task_id]['error'] = str(e)
-            print(f"[Retry] 失败: {e}")
-    threading.Thread(target=retry_thread, daemon=True).start()
-    return jsonify({'task_id': task_id, 'video_id': video_id, 'status': 'downloading'})
-
+    return jsonify({'status': 'ok', 'timestamp': int(time.time() * 1000)})
 
 if __name__ == '__main__':
     import argparse
-
     parser = argparse.ArgumentParser()
     parser.add_argument('--port', type=int, default=15678)
     args = parser.parse_args()
-
     print(f"Starting server on port {args.port}")
     app.run(host='127.0.0.1', port=args.port, debug=False)

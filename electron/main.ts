@@ -152,21 +152,11 @@ function startPythonBackend() {
 // 显示 Python 错误提示
 function showPythonError(message: string) {
   if (win) {
-    dialog.showMessageBox(win, {
-      type: 'warning',
-      title: 'Python 环境问题',
-      message: '无法启动后端服务',
-      detail: `${message}\n\n本应用需要 Python 3.10+ 和 Playwright 才能运行。\n\n安装步骤:\n1. 安装 Python 3.10+: https://www.python.org/downloads/\n2. 安装依赖: pip install playwright httpx beautifulsoup4 flask flask-cors\n3. 安装浏览器: playwright install chromium`,
-      buttons: ['确定', '打开 Python 下载页面'],
-    }).then((result) => {
-      if (result.response === 1) {
-        shell.openExternal('https://www.python.org/downloads/')
-      }
-    })
+    dialog.showErrorBox('启动错误', message)
   }
 }
 
-// 停止 Python 后端
+// 停止后端服务器
 function stopPythonBackend() {
   if (pythonProcess) {
     pythonProcess.kill()
@@ -174,78 +164,89 @@ function stopPythonBackend() {
   }
 }
 
-// 调用 Python API
-async function callPythonAPI(endpoint: string, method: string = 'GET', body?: any): Promise<any> {
-  const url = `http://127.0.0.1:${PYTHON_PORT}${endpoint}`
-  const options: RequestInit = {
-    method,
-    headers: { 'Content-Type': 'application/json' },
-  }
-
-  if (body && method === 'POST') {
-    options.body = JSON.stringify(body)
-  }
-
-  try {
-    const response = await fetch(url, options)
-    return await response.json()
-  } catch (error) {
-    console.error(`Python API call failed: ${error}`)
-    throw error
-  }
-}
-
-// 默认下载目录
-function getDefaultDownloadDir(): string {
-  return path.join(os.homedir(), 'Downloads', 'MissAV')
-}
-
-// 确保下载目录存在
-function ensureDownloadDir(dir: string): string {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true })
-  }
-  return dir
-}
-
-// 存储下载任务
-const downloadTasks = new Map<string, any>()
-
-// 创建窗口
+// 创建主窗口
 function createWindow() {
   win = new BrowserWindow({
-    width: 900,
-    height: 650,
-    minWidth: 700,
-    minHeight: 500,
+    width: 1200,
+    height: 800,
+    minWidth: 900,
+    minHeight: 600,
     frame: false,
     titleBarStyle: 'hidden',
     backgroundColor: '#1a1a2e',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
-      contextIsolation: true,
-    },
+      contextIsolation: true
+    }
   })
 
-  // 测试模式下打开 devtools
+  // 开发模式下打开开发者工具
   if (VITE_DEV_SERVER_URL) {
     win.loadURL(VITE_DEV_SERVER_URL)
     win.webContents.openDevTools()
   } else {
     win.loadFile(path.join(RENDERER_DIST, 'index.html'))
   }
+
+  win.on('closed', () => {
+    win = null
+  })
+}
+
+// API 调用辅助函数
+async function callPythonAPI(endpoint: string, method = 'GET', body?: any) {
+  const url = `http://127.0.0.1:${PYTHON_PORT}${endpoint}`
+  
+  const options: RequestInit = {
+    method,
+    headers: {
+      'Content-Type': 'application/json'
+    }
+  }
+
+  if (body) {
+    options.body = JSON.stringify(body)
+  }
+
+  try {
+    const response = await fetch(url, options)
+    const data = await response.json()
+    
+    if (!response.ok) {
+      throw new Error(data.error || 'API request failed')
+    }
+    
+    return data
+  } catch (error) {
+    console.error(`API call failed: ${method} ${endpoint}`, error)
+    throw error
+  }
 }
 
 // 设置 IPC 处理器
 function setupIPC() {
-  // 剪贴板
-  ipcMain.handle('clipboard:readText', () => {
-    return clipboard.readText()
+  // 窗口控制
+  ipcMain.on('window:minimize', () => win?.minimize())
+  ipcMain.on('window:maximize', () => {
+    if (win?.isMaximized()) {
+      win.unmaximize()
+    } else {
+      win?.maximize()
+    }
+  })
+  ipcMain.on('window:close', () => win?.close())
+
+  // 应用信息
+  ipcMain.handle('app:getVersion', () => app.getVersion())
+  ipcMain.handle('app:getDefaultDownloadDir', () => {
+    return path.join(os.homedir(), 'Downloads')
   })
 
+  // 剪贴板
+  ipcMain.handle('clipboard:readText', () => clipboard.readText())
   ipcMain.handle('clipboard:writeText', (_, text: string) => {
-    clipboard.writeText(text)
+    clipboard.writeText(text); return true
   })
 
   // 对话框
@@ -256,50 +257,25 @@ function setupIPC() {
     return result.canceled ? null : result.filePaths[0]
   })
 
-  ipcMain.handle('dialog:selectFile', async () => {
+  ipcMain.handle('dialog:selectFile', async (_, options: { filters?: { name: string; extensions: string[] }[] }) => {
     const result = await dialog.showOpenDialog(win!, {
-      properties: ['openFile']
+      properties: ['openFile'],
+      filters: options?.filters
     })
     return result.canceled ? null : result.filePaths[0]
   })
 
-  // 应用信息
-  ipcMain.handle('app:getVersion', () => {
-    return app.getVersion()
-  })
-
-  ipcMain.handle('app:getDefaultDownloadDir', () => {
-    return ensureDownloadDir(getDefaultDownloadDir())
-  })
-
   // Shell 操作
-  ipcMain.handle('shell:openPath', async (_, filePath: string) => {
-    return await shell.openPath(filePath)
+  ipcMain.handle('shell:openPath', async (_, path: string) => {
+    await shell.openPath(path)
   })
 
-  ipcMain.handle('shell:openFolder', (_, filePath: string) => {
-    return shell.openPath(path.dirname(filePath))
+  ipcMain.handle('shell:openFolder', async (_, folderPath: string) => {
+    await shell.openPath(folderPath)
   })
 
-  ipcMain.handle('shell:openExternal', (_, url: string) => {
-    return shell.openExternal(url)
-  })
-
-  // 窗口控制
-  ipcMain.handle('window:minimize', () => {
-    win?.minimize()
-  })
-
-  ipcMain.handle('window:maximize', () => {
-    if (win?.isMaximized()) {
-      win.unmaximize()
-    } else {
-      win?.maximize()
-    }
-  })
-
-  ipcMain.handle('window:close', () => {
-    win?.close()
+  ipcMain.handle('shell:openExternal', async (_, url: string) => {
+    await shell.openExternal(url)
   })
 
   // 视频解析
@@ -312,32 +288,28 @@ function setupIPC() {
     }
   })
 
-    // 视频下载（支持本地下载和 Novel 入库两种模式）
-  ipcMain.handle('video:download', async (_, options: { url: string; outputDir: string; maxConcurrent?: number; proxy?: string; autoMerge?: boolean; keepTempFiles?: boolean; downloadMode?: string; novelProjectPath?: string; novelBackendUrl?: string }) => {
+  // 视频下载
+  ipcMain.handle('video:download', async (_, options: {
+    url: string
+    outputDir: string
+    maxConcurrent?: number
+    proxy?: string
+    autoMerge?: boolean
+    keepTempFiles?: boolean
+    downloadMode?: string
+    novelProjectPath?: string
+    novelBackendUrl?: string
+  }) => {
     try {
-      const isNovelMode = options.downloadMode === 'novel'
-      const apiEndpoint = isNovelMode ? '/api/download-to-novel' : '/api/download'
-      const body: any = {
-        url: options.url,
-        maxConcurrent: options.maxConcurrent || 16,
-        proxy: options.proxy || '',
-        autoMerge: options.autoMerge !== false,
-        keepTempFiles: options.keepTempFiles || false
-      }
-      if (isNovelMode) {
-        body.novelProjectPath = options.novelProjectPath || 'F:\\\\novel'
-      } else {
-        body.outputDir = options.outputDir
-      }
-      const result = await callPythonAPI(apiEndpoint, 'POST', body)
+      const apiEndpoint = options.downloadMode === 'novel' ? '/api/download-to-novel' : '/api/download'
+      const result = await callPythonAPI(apiEndpoint, 'POST', options)
       const taskId = result.task_id
 
-      // 开始轮询进度
+      // 轮询下载进度
       const pollProgress = async () => {
         try {
-          const progress = await callPythonAPI(`/api/progress/${taskId}`)
-
-          // 发送进度更新
+          const progress = await callPythonAPI(`/api/download-status/${taskId}`)
+          
           win?.webContents.send('download:progress', {
             taskId,
             progress: progress.progress,
@@ -396,53 +368,23 @@ function setupIPC() {
   // 暂停下载
   ipcMain.handle('download:pause', async (_, taskId: string) => {
     try {
-      await callPythonAPI(`/api/pause/${taskId}`, 'POST')
+      await callPythonAPI(`/api/pause-download/${taskId}`, 'POST')
     } catch (error) {
       console.error('Pause error:', error)
     }
   })
 
-  // 历史记录
-  ipcMain.handle('history:get', async () => {
-
-  // 重试转码 (Novel 入库失败后)
-  ipcMain.handle('video:retryTranscode', async (_, options: { videoId: number; novelProjectPath?: string }) => {
+  // 恢复下载
+  ipcMain.handle('download:resume', async (_, taskId: string) => {
     try {
-      const result = await callPythonAPI('/api/retry-transcode/' + options.videoId, 'POST', {
-        novelProjectPath: options.novelProjectPath || 'F:\\novel'
-      })
-      const taskId = result.task_id
-
-      const pollProgress = async () => {
-        try {
-          const progress = await callPythonAPI(`/api/progress/${taskId}`)
-          win?.webContents.send('download:progress', {
-            taskId, progress: progress.progress, speed: progress.speed,
-            status: progress.status, phase: progress.phase,
-            phaseTitle: progress.phaseTitle, detail: progress.detail,
-            transcodeProgress: progress.transcodeProgress,
-            novelVideoId: progress.novelVideoId,
-          })
-          if (progress.status === 'completed' || progress.status === 'error') {
-            if (progress.status === 'completed') {
-              win?.webContents.send('download:completed', { taskId, filename: '' })
-            } else {
-              win?.webContents.send('download:error', { taskId, error: progress.error || '转码失败' })
-            }
-            return
-          }
-          setTimeout(pollProgress, 1000)
-        } catch (error) {
-          console.error('Retry poll error:', error)
-        }
-      }
-      pollProgress()
-
-      return { id: taskId, status: 'downloading', progress: 0 }
-    } catch (error: any) {
-      throw new Error(error.message || '重试转码失败')
+      await callPythonAPI(`/api/resume-download/${taskId}`, 'POST')
+    } catch (error) {
+      console.error('Resume error:', error)
     }
   })
+
+  // 历史记录
+  ipcMain.handle('history:get', async () => {
     try {
       const result = await callPythonAPI('/api/history')
       return result.records || []
@@ -470,9 +412,14 @@ function setupIPC() {
   // 图片代理 - 解决跨域问题
   ipcMain.handle('app:fetchImage', async (_, url: string) => {
     try {
+      // 根据 URL 动态设置 Referer
+      let referer = 'https://missav.ws/'
+      if (url.includes('kissjav.com')) {
+        referer = 'https://kissjav.com/'
+      }
       const response = await net.fetch(url, {
         headers: {
-          'Referer': 'https://missav.ws/',
+          'Referer': referer,
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
       })

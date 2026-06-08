@@ -7,7 +7,7 @@
           <!-- Title -->
           <div class="flex flex-col gap-1">
             <h1 class="font-headline text-2xl font-bold leading-tight text-on-surface">MissAV 视频下载</h1>
-            <p class="text-on-surface-variant text-sm">粘贴 missav 视频链接，解析后下载高清视频</p>
+            <p class="text-on-surface-variant text-sm">粘贴视频链接，支持 missav.ws 和 kissjav.com</p>
           </div>
 
           <!-- URL Input -->
@@ -18,7 +18,7 @@
                 v-model="url"
                 aria-label="粘贴视频链接"
                 class="w-full h-24 bg-surface-container-highest rounded-md p-3 text-on-surface placeholder:text-outline-variant resize-none font-body text-sm border-2 border-transparent focus:border-primary focus:outline-none transition-all"
-                placeholder="在此粘贴 missav 视频链接，例如: https://missav.ws/xxx-xxx"
+                placeholder="在此粘贴视频链接，支持 missav.ws 和 kissjav.com"
                 @keydown.enter.prevent="parseVideo"
               />
             </div>
@@ -212,21 +212,26 @@
             </div>
 
             <!-- Phase detail -->
-            <div v-if="task.status === 'downloading' && task.detail" class="text-[10px] text-on-surface-variant truncate">
+            <div v-if="task.detail" class="text-[10px] text-on-surface-variant truncate">
               {{ task.detail }}
             </div>
 
             <!-- Progress Bar -->
-            <div v-if="task.status === 'downloading'" class="flex flex-col gap-1">
+            <div v-if="task.status === 'downloading' || task.phase === 'importing'" class="flex flex-col gap-1">
               <div class="w-full h-1.5 bg-surface-variant rounded-full overflow-hidden">
                 <div
                   class="h-full rounded-full transition-all duration-300"
-                  :class="task.phase === 'transcoding' ? 'bg-warning' : 'bg-primary'"
+                  :class="task.phase === 'transcoding' ? 'bg-warning' : task.phase === 'importing' ? 'bg-success' : 'bg-primary'"
                   :style="{ width: task.progress + '%' }"
                 ></div>
               </div>
               <div class="flex justify-between text-[10px] text-on-surface-variant">
-                <span>{{ task.phase === 'merging' || task.phase === 'transcoding' ? '处理中...' : task.progress.toFixed(1) + '%' }}</span>
+                <span>
+                  <template v-if="task.phase === 'importing'">入库中...</template>
+                  <template v-else-if="task.phase === 'transcoding'">转码中...</template>
+                  <template v-else-if="task.phase === 'merging'">合并中...</template>
+                  <template v-else>{{ task.progress.toFixed(1) + '%' }}</template>
+                </span>
                 <span>{{ task.speed }}</span>
               </div>
             </div>
@@ -234,7 +239,7 @@
             <!-- Error -->
 
             <!-- Transcode Progress -->
-            <div v-if="task.status === 'downloading' && task.phase === 'transcoding'" class="flex flex-col gap-1">
+            <div v-if="task.phase === 'transcoding'" class="flex flex-col gap-1">
               <div class="flex items-center gap-1 text-[10px] text-on-surface-variant">
                 <span class="material-symbols-outlined text-xs">video_stable</span>
                 <span>转码进度</span>
@@ -384,18 +389,7 @@ async function parseVideo() {
     if (window.electronAPI?.video?.parse) {
       videoInfo.value = await window.electronAPI.video.parse(url.value.trim())
     } else {
-      // 开发模式模拟
-      await new Promise(resolve => setTimeout(resolve, 1500))
-      videoInfo.value = {
-        title: 'Mock Video Title - Test 123',
-        cover: '',
-        m3u8_url: null,
-        actresses: ['Test Actress'],
-        tags: ['tag1', 'tag2', 'tag3'],
-        code: 'TEST-001',
-        release_date: '2024-01-01',
-        duration: '120 min'
-      }
+      throw new Error('Electron API 不可用，请通过桌面应用运行')
     }
 
     // 加载封面图（使用代理解决跨域问题）
@@ -545,3 +539,4 @@ function getStatusText(status: DownloadTask['status']): string {
   return map[status] || status
 }
 </script>
+
