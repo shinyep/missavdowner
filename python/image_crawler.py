@@ -282,7 +282,7 @@ class ImageGalleryCrawler:
     def _append_image_url(self, found: list[str], seen: set[str], page_url: str, candidate: str | None) -> None:
         if not candidate or candidate.startswith("data:"):
             return
-        if any(token in candidate.lower() for token in ("placeholder", "loading", "avatar", "favicon", "logo")):
+        if any(token in candidate.lower() for token in ("placeholder", "loading", "avatar", "favicon", "logo", "beautifulgirls", "4khd-beautifulgirls")):
             return
         absolute_url = urljoin(page_url, candidate)
         path = urlparse(absolute_url).path.lower()
