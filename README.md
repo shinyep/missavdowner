@@ -1,124 +1,115 @@
-# MissAV Downloader
+﻿# MissAV Downloader
 
-MissAV 视频下载器 - Windows 11 原生桌面应用
+多功能媒体下载器 — Windows 桌面应用，支持视频和图集下载
 
 ## 功能特性
 
-- 🎬 从 missav.ws 解析和下载视频
-- 📊 实时下载进度和速度显示
-- 🔄 自动合并 m3u8 流为 mp4 格式
-- 📝 提取视频元数据（标题、演员、标签等）
-- 📁 下载队列管理
-- 📚 下载历史记录
+### 视频下载
+
+- 🎬 支持 missav.ws / kissjav.com 等视频站点
+- 📊 实时下载进度、速度和详细阶段提示
+- 🔄 m3u8 流自动合并为 mp4
+- 📝 提取视频元数据（标题、演员、标签、番号）
+- 🎞️ 支持转码并入库到自建 Novel 媒体库
+- ⏸️ 下载暂停/恢复
+
+### 图集下载
+
+- 🖼️ 支持 4khd / szzs.uuss.uk 等图集站点
+- 🔍 两步操作：解析图集预览 → 选择模式 → 下载
+- 📄 自动提取分页，全部图片一键下载
+- 📈 任务卡片显示详细进度：总张数 / 当前第几张 / 成功 / 失败
+- 💾 支持下载到本地或直接入库 Novel 图集库
+- 🧹 入库模式自动清理临时缓存
 
 ## 技术栈
 
-- **Electron 30** - 跨平台桌面应用框架
-- **Vue 3** - 前端 UI 框架
-- **TypeScript** - 类型安全的 JavaScript
-- **Vite 5** - 构建工具
-- **Tailwind CSS** - CSS 框架
-- **Playwright** - 浏览器自动化
-- **FFmpeg** - 视频处理
+- **Electron 30** · **Vue 3** · **TypeScript** · **Vite 5** · **Tailwind CSS**
+- **Python Flask** — 本地 API 后端
+- **Playwright** + **httpx** — 双引擎页面加载，自动反爬适配
+- **BeautifulSoup** — HTML 解析
+- **FFmpeg** — 视频转码处理
 
 ## 系统要求
 
 - Windows 10/11 (64-bit)
-- **Python 3.10+** (必须，并添加到 PATH)
-- **Playwright** (用于浏览器自动化)
-- FFmpeg (已包含在安装包中)
+- **Python 3.10+**（必须添加到 PATH）
 
-### 安装 Python 依赖
+### Python 依赖安装
 
-```bash
-# 安装 Python 依赖
-pip install playwright httpx beautifulsoup4 flask flask-cors
-
-# 安装 Playwright 浏览器
+\\\ash
+pip install playwright httpx beautifulsoup4 flask flask-cors Pillow
 playwright install chromium
-```
+\\\
 
 ## 安装使用
 
-### 方式一：使用安装程序
+### 安装程序
 
-1. 下载 `MissAV Downloader Setup 1.0.0.exe`
-2. 运行安装程序
-3. 按提示完成安装
-4. 启动应用
+从 [Releases](https://github.com/shinyep/missavdowner/releases) 下载最新 MissAV Downloader Setup x.x.x.exe，运行安装即可。
 
-### 方式二：从源码运行
+### 从源码运行
 
-```bash
-# 克隆项目
-git clone <repo-url>
+\\\ash
+git clone https://github.com/shinyep/missavdowner.git
 cd videodown
-
-# 安装 Node.js 依赖
 npm install
-
-# 安装 Python 依赖
 pip install -r python/requirements.txt
 playwright install chromium
-
-# 复制 ffmpeg.exe 到 resources 目录
-
-# 运行开发模式
 npm run dev
-
-# 构建生产版本
-npm run build
-```
+\\\
 
 ## 使用方法
 
-1. 启动应用
-2. 粘贴 missav 视频链接到输入框
-3. 点击"解析视频"按钮
-4. 等待解析完成，查看视频信息
-5. 选择保存目录
-6. 点击"开始下载"
-7. 等待下载和合并完成
+### 视频下载
+
+1. 粘贴 missav / kissjav 视频链接
+2. 点击「解析视频」
+3. 查看视频信息，选择保存方式（本地 / 入库）
+4. 点击「开始下载」
+
+### 图集下载
+
+1. 粘贴 4khd / szzs 图集链接
+2. 点击「解析图集」查看标题和图片数量
+3. 选择「下载到本地」或「入库到 Novel」
+4. 点击「开始下载」
 
 ## 项目结构
 
-```
+\\\
 videodown/
-├── electron/           # Electron 主进程
-│   ├── main.ts        # 主进程入口
-│   └── preload.ts     # 预加载脚本
-├── src/               # Vue 前端
-│   ├── components/    # Vue 组件
-│   ├── types/         # TypeScript 类型
-│   └── App.vue        # 根组件
-├── python/            # Python 后端
-│   ├── crawler.py     # 爬虫核心
-│   └── server.py      # Flask API 服务器
-├── resources/         # 资源文件
-│   └── ffmpeg.exe     # FFmpeg 可执行文件
-└── package.json       # 项目配置
-```
+├── electron/              # Electron 主进程
+│   ├── main.ts           # 主进程入口 + IPC 处理
+│   └── preload.ts        # 预加载脚本
+├── src/                  # Vue 前端
+│   ├── components/       # 组件
+│   │   ├── GalleryView.vue   # 图集下载
+│   │   └── ...
+│   ├── types/            # TypeScript 类型定义
+│   └── App.vue           # 根组件
+├── python/               # Python 后端
+│   ├── server.py         # Flask API 服务器
+│   ├── crawler.py        # missav 爬虫
+│   ├── kissjav_crawler.py    # kissjav 爬虫
+│   ├── image_crawler.py      # 图集爬虫（4khd/szzs）
+│   └── novel_import.py       # Novel 项目入库
+├── resources/            # 资源文件
+│   └── ffmpeg.exe        # FFmpeg 可执行文件
+└── package.json
+\\\
 
-## 开发说明
+## 开发
 
-### 开发模式
-```bash
-npm run dev
-```
-
-### 构建打包
-```bash
-npm run build
-```
-
-### 类型检查
-```bash
-npx vue-tsc --noEmit
-```
+\\\ash
+npm run dev          # 开发模式
+npm run build        # 构建打包
+npx vue-tsc --noEmit # 类型检查
+\\\
 
 ## 注意事项
 
-⚠️ 本工具仅供个人学习和研究使用，请勿用于商业用途。
+⚠️ 本工具仅供个人学习和研究使用，请勿用于商业用途或侵犯版权。
 
 ## 许可证
 
