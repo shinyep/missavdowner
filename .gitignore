@@ -1,4 +1,4 @@
-# Dependencies
+﻿# Dependencies
 node_modules/
 python/__pycache__/
 python/.venv/
@@ -43,3 +43,5 @@ build/
 # 本地文档（不上传）
 开发手册.md
 TODO.md
+
+技术栈文档.md
