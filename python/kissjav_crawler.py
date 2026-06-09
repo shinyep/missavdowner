@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
+import httpx
 from playwright.async_api import async_playwright, Page
 
 # 强制 stdout UTF-8 编码，避免 Windows GBK 环境韩文崩溃
@@ -261,16 +262,22 @@ class KissjavCrawler:
 
 
 class KissjavVideoDownloader:
-    """KissJAV 视频下载器 - 使用 Playwright 下载（携带浏览器 cookies 绕过 CDN 校验）"""
+    """KissJAV 视频下载器 - 直接下载 mp4 文件"""
 
     def __init__(self):
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': 'https://kissjav.com/',
+        }
         self._proxy = None
         self._paused_tasks: set[str] = set()
 
     def set_proxy(self, proxy: str | None):
+        """设置代理"""
         self._proxy = proxy
 
     def set_concurrent(self, max_concurrent: int):
+        """设置并发数（兼容接口，mp4 直链下载不需要并发控制）"""
         pass
 
     async def download_video(
@@ -280,82 +287,80 @@ class KissjavVideoDownloader:
         output: str | Path,
         progress_callback=None
     ) -> str:
-        """使用 Playwright 响应拦截下载视频（走浏览器网络栈，携带 cookies）。"""
-        from crawler import BrowserManager
+        """
+        下载 mp4 视频文件
+
+        Args:
+            video_url: 视频直链 URL
+            referer: Referer 头
+            output: 输出文件路径
+            progress_callback: 进度回调函数
+
+        Returns:
+            下载完成的文件路径
+        """
         output = Path(output)
         output.parent.mkdir(parents=True, exist_ok=True)
 
-        print(f"[Kissjav] Playwright 下载: {video_url[:80]}...")
+        print(f"[Kissjav] 开始下载视频: {video_url}")
+        print(f"[Kissjav] 保存到: {output}")
 
-        context = await BrowserManager.new_context()
-        page = await context.new_page()
+        client_kwargs = {
+            'headers': {**self.headers, 'Referer': referer},
+            'timeout': httpx.Timeout(300, connect=30),
+            'follow_redirects': True,
+        }
+        if self._proxy:
+            client_kwargs['proxy'] = self._proxy
 
-        try:
-            # 访问 kissjav 页面获取 cookies
-            await page.goto(referer, wait_until='domcontentloaded', timeout=30000)
-            await page.wait_for_timeout(2000)
-
-            # 拦截所有响应，捕获视频数据（过滤广告追踪 URL）
-            video_data = {}
-            ad_domains = {'coosync.com', 'alfalfaemployeeresource.com', 'magsrv.com', 'exdynsrv.com'}
-
-            async def on_response(response):
-                url = response.url
-                status = response.status
-                # 跳过广告追踪响应
-                if any(ad in url for ad in ad_domains):
-                    return
-                # 匹配视频 CDN 响应（200 + 大文件）
-                if status == 200:
-                    try:
-                        content_length = int(response.headers.get('content-length', '0'))
-                        if content_length > 100000 or '.mp4' in url:  # >100KB 或 mp4
-                            body = await response.body()
-                            if len(body) > 100000:
-                                video_data['bytes'] = body
-                                video_data['url'] = url
-                                print(f"[Kissjav] 捕获: {url[:60]}... {len(body)/1024/1024:.1f}MB")
-                    except Exception:
-                        pass
-
-            page.on('response', on_response)
-
-            # 导航到视频 URL（浏览器自动跟随所有重定向）
+        async with httpx.AsyncClient(**client_kwargs) as client:
+            # 获取文件大小
+            total_size = 0
             try:
-                await page.goto(video_url, wait_until='commit', timeout=120000)
-            except Exception:
-                pass
+                head_resp = await client.head(video_url)
+                total_size = int(head_resp.headers.get('content-length', 0))
+                print(f"[Kissjav] 文件大小: {total_size / 1024 / 1024:.2f} MB")
+            except Exception as e:
+                print(f"[Kissjav] 获取文件大小失败: {e}")
 
-            # 等待视频响应到达（最多 5 分钟）
-            for i in range(300):
-                if 'bytes' in video_data:
-                    break
-                if i % 30 == 29:
-                    print(f"[Kissjav] 等待中... {i+1}s")
-                await page.wait_for_timeout(1000)
+            # 流式下载
+            downloaded = 0
+            start_time = time.time()
 
-            if 'bytes' not in video_data:
-                raise RuntimeError("下载失败: 未捕获到视频数据（CDN 可能拒绝了请求）")
+            async with client.stream('GET', video_url) as response:
+                response.raise_for_status()
 
-            data = video_data['bytes']
-            output.write_bytes(data)
+                with open(output, 'wb') as f:
+                    async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
+                        f.write(chunk)
+                        downloaded += len(chunk)
 
-            size_mb = len(data) / 1024 / 1024
-            if progress_callback:
-                progress_callback(100, f"{size_mb:.1f} MB")
+                        # 计算进度和速度
+                        elapsed = time.time() - start_time
+                        speed = downloaded / elapsed if elapsed > 0 else 0
+                        speed_str = f"{speed / 1024 / 1024:.2f} MB/s"
 
-            print(f"[Kissjav] 下载完成: {output} ({size_mb:.1f} MB)")
+                        if total_size > 0:
+                            progress = (downloaded / total_size) * 100
+                        else:
+                            progress = -1
+
+                        if progress_callback:
+                            progress_callback(progress, speed_str)
+
+            print(f"[Kissjav] 下载完成: {output}")
             return str(output)
-        finally:
-            await context.close()
 
     def pause_task(self, task_id: str):
+        """暂停任务"""
         self._paused_tasks.add(task_id)
 
     def resume_task(self, task_id: str):
+        """恢复任务"""
         self._paused_tasks.discard(task_id)
 
     def is_paused(self, task_id: str) -> bool:
+        """检查任务是否暂停"""
         return task_id in self._paused_tasks
 
 
