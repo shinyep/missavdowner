@@ -17,7 +17,6 @@ import sys
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
-import httpx
 from playwright.async_api import async_playwright, Page
 
 # 强制 stdout UTF-8 编码，避免 Windows GBK 环境韩文崩溃
@@ -40,64 +39,77 @@ class KissjavCrawler:
 
     async def parse_video(self, url: str) -> dict:
         """
-        解析视频页面，提取视频信息。
-        优先 httpx 直抓（快），Cloudflare 拦截时回退 Playwright（慢但能过 CF）。
+        解析视频页面，提取视频信息
+
+        Args:
+            url: kissjav 视频页面 URL
+
+        Returns:
+            包含视频信息的字典
         """
-        html_content = None
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=['--disable-blink-features=AutomationControlled']
+            )
+            context = await browser.new_context(
+                user_agent=self.headers['User-Agent'],
+                viewport={'width': 1920, 'height': 1080}
+            )
+            # 隐藏自动化标记
+            await context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => false });
+                window.chrome = { runtime: {} };
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+                Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
+            """)
+            page = await context.new_page()
 
-        # 快速路径：httpx 直抓静态 HTML
-        try:
-            async with httpx.AsyncClient(
-                headers=self.headers,
-                timeout=httpx.Timeout(15),
-                follow_redirects=True,
-            ) as client:
-                resp = await client.get(url)
-                if resp.status_code == 200 and 'flashvars' in resp.text:
-                    html_content = resp.text
-                    print(f"[Kissjav] httpx 直抓成功 ({len(html_content)} bytes)")
-        except Exception as e:
-            print(f"[Kissjav] httpx 失败: {e}，回退 Playwright")
+            try:
+                # 导航到页面
+                print(f"[Kissjav] 正在访问: {url}")
+                await page.goto(url, wait_until='domcontentloaded', timeout=60000)
 
-        # 慢速路径：Playwright（Cloudflare 保护时）
-        if html_content is None:
-            html_content = await self._fetch_with_playwright(url)
+                # 处理 Cloudflare 质询
+                await self._handle_cloudflare(page)
 
-        # 从 HTML 提取数据（两种路径共用）
-        flashvars = self._extract_flashvars_from_html(html_content)
-        title = self._extract_title_from_html(html_content)
+                # 等待页面加载完成
+                await page.wait_for_timeout(3000)
 
-        cover = flashvars.get('preview_url', '')
-        if cover and cover.startswith('//'):
-            cover = 'https:' + cover
+                # 从 HTML 源码中提取 flashvars 数据（最可靠的方式）
+                html_content = await page.content()
+                flashvars = self._extract_flashvars_from_html(html_content)
 
-        video_url = flashvars.get('video_url', '')
-        metadata = self._extract_metadata_from_flashvars(flashvars)
+                # 提取标题
+                title = self._extract_title_from_html(html_content) or await self._extract_title(page)
 
-        print(f"[Kissjav] 标题: {title}")
-        print(f"[Kissjav] 视频: {video_url[:80]}...")
+                # 提取封面
+                cover = flashvars.get('preview_url', '')
+                if cover and cover.startswith('//'):
+                    cover = 'https:' + cover
 
-        return {
-            'title': title,
-            'cover': cover,
-            'm3u8_url': None,
-            'video_url': video_url,
-            **metadata
-        }
+                # 提取视频 URL
+                video_url = flashvars.get('video_url', '')
 
-    async def _fetch_with_playwright(self, url: str) -> str:
-        """Playwright 兜底：处理 Cloudflare 质询。复用 BrowserManager 浏览器实例。"""
-        from crawler import BrowserManager
-        context = await BrowserManager.new_context()
-        page = await context.new_page()
-        try:
-            print(f"[Kissjav] Playwright 访问: {url}")
-            await page.goto(url, wait_until='domcontentloaded', timeout=60000)
-            await self._handle_cloudflare(page)
-            await page.wait_for_timeout(1000)
-            return await page.content()
-        finally:
-            await context.close()
+                # 提取元数据
+                metadata = self._extract_metadata_from_flashvars(flashvars)
+
+                print(f"[Kissjav] 标题: {title}")
+                print(f"[Kissjav] 封面: {cover[:80]}...")
+                print(f"[Kissjav] 视频: {video_url[:80]}...")
+                print(f"[Kissjav] 演员: {metadata.get('actresses', [])}")
+                print(f"[Kissjav] 标签: {metadata.get('tags', [])}")
+
+                return {
+                    'title': title,
+                    'cover': cover,
+                    'm3u8_url': None,
+                    'video_url': video_url,
+                    **metadata
+                }
+
+            finally:
+                await browser.close()
 
     def _extract_flashvars_from_html(self, html: str) -> dict:
         """
@@ -249,22 +261,16 @@ class KissjavCrawler:
 
 
 class KissjavVideoDownloader:
-    """KissJAV 视频下载器 - 直接下载 mp4 文件"""
+    """KissJAV 视频下载器 - 使用 Playwright 下载（携带浏览器 cookies 绕过 CDN 校验）"""
 
     def __init__(self):
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Referer': 'https://kissjav.com/',
-        }
         self._proxy = None
         self._paused_tasks: set[str] = set()
 
     def set_proxy(self, proxy: str | None):
-        """设置代理"""
         self._proxy = proxy
 
     def set_concurrent(self, max_concurrent: int):
-        """设置并发数（兼容接口，mp4 直链下载不需要并发控制）"""
         pass
 
     async def download_video(
@@ -274,80 +280,82 @@ class KissjavVideoDownloader:
         output: str | Path,
         progress_callback=None
     ) -> str:
-        """
-        下载 mp4 视频文件
-
-        Args:
-            video_url: 视频直链 URL
-            referer: Referer 头
-            output: 输出文件路径
-            progress_callback: 进度回调函数
-
-        Returns:
-            下载完成的文件路径
-        """
+        """使用 Playwright 响应拦截下载视频（走浏览器网络栈，携带 cookies）。"""
+        from crawler import BrowserManager
         output = Path(output)
         output.parent.mkdir(parents=True, exist_ok=True)
 
-        print(f"[Kissjav] 开始下载视频: {video_url}")
-        print(f"[Kissjav] 保存到: {output}")
+        print(f"[Kissjav] Playwright 下载: {video_url[:80]}...")
 
-        client_kwargs = {
-            'headers': {**self.headers, 'Referer': referer},
-            'timeout': httpx.Timeout(300, connect=30),
-            'follow_redirects': True,
-        }
-        if self._proxy:
-            client_kwargs['proxy'] = self._proxy
+        context = await BrowserManager.new_context()
+        page = await context.new_page()
 
-        async with httpx.AsyncClient(**client_kwargs) as client:
-            # 获取文件大小
-            total_size = 0
+        try:
+            # 访问 kissjav 页面获取 cookies
+            await page.goto(referer, wait_until='domcontentloaded', timeout=30000)
+            await page.wait_for_timeout(2000)
+
+            # 拦截所有响应，捕获视频数据（过滤广告追踪 URL）
+            video_data = {}
+            ad_domains = {'coosync.com', 'alfalfaemployeeresource.com', 'magsrv.com', 'exdynsrv.com'}
+
+            async def on_response(response):
+                url = response.url
+                status = response.status
+                # 跳过广告追踪响应
+                if any(ad in url for ad in ad_domains):
+                    return
+                # 匹配视频 CDN 响应（200 + 大文件）
+                if status == 200:
+                    try:
+                        content_length = int(response.headers.get('content-length', '0'))
+                        if content_length > 100000 or '.mp4' in url:  # >100KB 或 mp4
+                            body = await response.body()
+                            if len(body) > 100000:
+                                video_data['bytes'] = body
+                                video_data['url'] = url
+                                print(f"[Kissjav] 捕获: {url[:60]}... {len(body)/1024/1024:.1f}MB")
+                    except Exception:
+                        pass
+
+            page.on('response', on_response)
+
+            # 导航到视频 URL（浏览器自动跟随所有重定向）
             try:
-                head_resp = await client.head(video_url)
-                total_size = int(head_resp.headers.get('content-length', 0))
-                print(f"[Kissjav] 文件大小: {total_size / 1024 / 1024:.2f} MB")
-            except Exception as e:
-                print(f"[Kissjav] 获取文件大小失败: {e}")
+                await page.goto(video_url, wait_until='commit', timeout=120000)
+            except Exception:
+                pass
 
-            # 流式下载
-            downloaded = 0
-            start_time = time.time()
+            # 等待视频响应到达（最多 5 分钟）
+            for i in range(300):
+                if 'bytes' in video_data:
+                    break
+                if i % 30 == 29:
+                    print(f"[Kissjav] 等待中... {i+1}s")
+                await page.wait_for_timeout(1000)
 
-            async with client.stream('GET', video_url) as response:
-                response.raise_for_status()
+            if 'bytes' not in video_data:
+                raise RuntimeError("下载失败: 未捕获到视频数据（CDN 可能拒绝了请求）")
 
-                with open(output, 'wb') as f:
-                    async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
-                        f.write(chunk)
-                        downloaded += len(chunk)
+            data = video_data['bytes']
+            output.write_bytes(data)
 
-                        # 计算进度和速度
-                        elapsed = time.time() - start_time
-                        speed = downloaded / elapsed if elapsed > 0 else 0
-                        speed_str = f"{speed / 1024 / 1024:.2f} MB/s"
+            size_mb = len(data) / 1024 / 1024
+            if progress_callback:
+                progress_callback(100, f"{size_mb:.1f} MB")
 
-                        if total_size > 0:
-                            progress = (downloaded / total_size) * 100
-                        else:
-                            progress = -1
-
-                        if progress_callback:
-                            progress_callback(progress, speed_str)
-
-            print(f"[Kissjav] 下载完成: {output}")
+            print(f"[Kissjav] 下载完成: {output} ({size_mb:.1f} MB)")
             return str(output)
+        finally:
+            await context.close()
 
     def pause_task(self, task_id: str):
-        """暂停任务"""
         self._paused_tasks.add(task_id)
 
     def resume_task(self, task_id: str):
-        """恢复任务"""
         self._paused_tasks.discard(task_id)
 
     def is_paused(self, task_id: str) -> bool:
-        """检查任务是否暂停"""
         return task_id in self._paused_tasks
 
 

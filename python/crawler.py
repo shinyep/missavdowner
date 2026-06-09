@@ -23,30 +23,61 @@ class BrowserManager:
 
     @classmethod
     async def get_browser(cls) -> Browser:
-        if cls._browser is None or not cls._browser.is_connected():
-            if cls._playwright is None:
-                cls._playwright = await async_playwright().start()
-            cls._browser = await cls._playwright.chromium.launch(
-                headless=True,
-                args=['--disable-blink-features=AutomationControlled'],
-            )
-            print("[BrowserManager] 新建浏览器实例")
+        if cls._browser is not None and cls._browser.is_connected():
+            return cls._browser
+
+        # 浏览器不存在或已断开，重建整个链路
+        try:
+            if cls._playwright:
+                await cls._playwright.stop()
+        except Exception:
+            pass
+        cls._playwright = None
+        cls._browser = None
+
+        cls._playwright = await async_playwright().start()
+        cls._browser = await cls._playwright.chromium.launch(
+            headless=True,
+            args=['--disable-blink-features=AutomationControlled'],
+        )
+        print("[BrowserManager] 新建浏览器实例")
         return cls._browser
 
     @classmethod
-    async def new_context(cls) -> BrowserContext:
-        browser = await cls.get_browser()
-        context = await browser.new_context(
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            viewport={'width': 1920, 'height': 1080},
-        )
-        await context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', { get: () => false });
-            window.chrome = { runtime: {} };
-            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-            Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
-        """)
-        return context
+    async def new_context(cls, accept_downloads: bool = False) -> BrowserContext:
+        for attempt in range(2):
+            try:
+                browser = await cls.get_browser()
+                context = await browser.new_context(
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    viewport={'width': 1920, 'height': 1080},
+                    accept_downloads=accept_downloads,
+                )
+                await context.add_init_script("""
+                    Object.defineProperty(navigator, 'webdriver', { get: () => false });
+                    window.chrome = { runtime: {} };
+                    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+                    Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
+                """)
+                return context
+            except Exception as e:
+                # 整个 Playwright 链路断开，强制完全重建
+                print(f"[BrowserManager] 实例失效({e})，完全重建中...")
+                try:
+                    if cls._browser:
+                        await cls._browser.close()
+                except Exception:
+                    pass
+                try:
+                    if cls._playwright:
+                        await cls._playwright.stop()
+                except Exception:
+                    pass
+                cls._browser = None
+                cls._playwright = None
+                if attempt == 1:
+                    raise
+        raise RuntimeError("无法创建浏览器 context")
 
     @classmethod
     async def close(cls):
