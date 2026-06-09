@@ -287,70 +287,92 @@ class KissjavVideoDownloader:
         output: str | Path,
         progress_callback=None
     ) -> str:
-        """
-        下载 mp4 视频文件
-
-        Args:
-            video_url: 视频直链 URL
-            referer: Referer 头
-            output: 输出文件路径
-            progress_callback: 进度回调函数
-
-        Returns:
-            下载完成的文件路径
-        """
+        """Playwright 提取 CDN URL + httpx 流式下载。"""
+        from crawler import BrowserManager
         output = Path(output)
         output.parent.mkdir(parents=True, exist_ok=True)
 
-        print(f"[Kissjav] 开始下载视频: {video_url}")
-        print(f"[Kissjav] 保存到: {output}")
+        # Step 1: 用 Playwright 解析 302 重定向获取真实 CDN URL
+        print(f"[Kissjav] 解析 CDN URL...")
+        context = await BrowserManager.new_context()
+        page = await context.new_page()
+        try:
+            await page.goto(referer, wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(2000)
 
-        client_kwargs = {
-            'headers': {**self.headers, 'Referer': referer},
-            'timeout': httpx.Timeout(300, connect=30),
-            'follow_redirects': True,
-        }
-        if self._proxy:
-            client_kwargs['proxy'] = self._proxy
+            cdn_url = []
 
-        async with httpx.AsyncClient(**client_kwargs) as client:
-            # 获取文件大小
-            total_size = 0
+            async def on_response(response):
+                ct = response.headers.get("content-type", "")
+                if "video/mp4" in ct and response.status == 200:
+                    cdn_url.append(response.url)
+
+            page.on("response", on_response)
+
             try:
-                head_resp = await client.head(video_url)
-                total_size = int(head_resp.headers.get('content-length', 0))
-                print(f"[Kissjav] 文件大小: {total_size / 1024 / 1024:.2f} MB")
+                await page.goto(video_url, wait_until="commit", timeout=30000)
+            except Exception:
+                pass
+
+            await page.wait_for_timeout(5000)
+        finally:
+            await context.close()
+
+        if not cdn_url:
+            raise RuntimeError("未解析到 CDN 视频 URL")
+        real_url = cdn_url[0]
+        print(f"[Kissjav] CDN: {real_url[:80]}...")
+
+        # Step 2: httpx 流式下载（断点续传）
+        cookies = await context.cookies() if False else {}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": referer,
+        }
+
+        print(f"[Kissjav] 开始下载...")
+        total_size = 0
+        downloaded = 0
+        start_time = time.time()
+        max_retries = 5
+
+        async with httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(300, connect=30), follow_redirects=True) as client:
+            try:
+                head = await client.head(real_url)
+                total_size = int(head.headers.get("content-length", 0))
+                print(f"[Kissjav] 文件大小: {total_size/1024/1024:.1f} MB")
             except Exception as e:
-                print(f"[Kissjav] 获取文件大小失败: {e}")
+                print(f"[Kissjav] 获取大小失败: {e}")
 
-            # 流式下载
-            downloaded = 0
-            start_time = time.time()
+            for retry in range(max_retries):
+                range_headers = dict(headers)
+                if downloaded > 0:
+                    range_headers["Range"] = f"bytes={downloaded}-"
+                    print(f"[Kissjav] 断点续传: {downloaded/1024/1024:.1f}MB")
+                try:
+                    async with client.stream("GET", real_url, headers=range_headers if downloaded > 0 else None) as resp:
+                        if downloaded == 0:
+                            resp.raise_for_status()
+                        mode = "ab" if downloaded > 0 else "wb"
+                        with open(output, mode) as f:
+                            async for chunk in resp.aiter_bytes(chunk_size=1024 * 1024):
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                elapsed = time.time() - start_time
+                                speed = downloaded / elapsed if elapsed > 0 else 0
+                                progress = (downloaded / total_size * 100) if total_size > 0 else -1
+                                if progress_callback and int(elapsed) % 5 == 0:
+                                    progress_callback(progress, f"{speed/1024/1024:.1f} MB/s")
+                    break
+                except Exception as e:
+                    print(f"[Kissjav] 中断 ({downloaded/1024/1024:.1f}MB): {e}")
+                    if retry < max_retries - 1:
+                        await asyncio.sleep(2)
+                    else:
+                        raise
 
-            async with client.stream('GET', video_url) as response:
-                response.raise_for_status()
-
-                with open(output, 'wb') as f:
-                    async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
-                        f.write(chunk)
-                        downloaded += len(chunk)
-
-                        # 计算进度和速度
-                        elapsed = time.time() - start_time
-                        speed = downloaded / elapsed if elapsed > 0 else 0
-                        speed_str = f"{speed / 1024 / 1024:.2f} MB/s"
-
-                        if total_size > 0:
-                            progress = (downloaded / total_size) * 100
-                        else:
-                            progress = -1
-
-                        if progress_callback:
-                            progress_callback(progress, speed_str)
-
-            print(f"[Kissjav] 下载完成: {output}")
+            print(f"[Kissjav] 下载完成: {output} ({downloaded/1024/1024:.1f} MB)")
             return str(output)
-
     def pause_task(self, task_id: str):
         """暂停任务"""
         self._paused_tasks.add(task_id)
