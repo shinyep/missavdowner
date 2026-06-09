@@ -3,6 +3,7 @@ MissAV 视频爬虫核心模块
 从 missav.ws 提取视频信息和下载链接
 """
 import asyncio
+import atexit
 import re
 import time
 from pathlib import Path
@@ -10,7 +11,66 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright, Page
+from playwright.async_api import async_playwright, Browser, BrowserContext, Page
+
+
+class BrowserManager:
+    """Playwright 浏览器实例单例，避免每次解析都启动/关闭浏览器"""
+
+    _instance = None
+    _browser: Browser | None = None
+    _playwright = None
+
+    @classmethod
+    async def get_browser(cls) -> Browser:
+        if cls._browser is None or not cls._browser.is_connected():
+            if cls._playwright is None:
+                cls._playwright = await async_playwright().start()
+            cls._browser = await cls._playwright.chromium.launch(
+                headless=True,
+                args=['--disable-blink-features=AutomationControlled'],
+            )
+            print("[BrowserManager] 新建浏览器实例")
+        return cls._browser
+
+    @classmethod
+    async def new_context(cls) -> BrowserContext:
+        browser = await cls.get_browser()
+        context = await browser.new_context(
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            viewport={'width': 1920, 'height': 1080},
+        )
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => false });
+            window.chrome = { runtime: {} };
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+            Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
+        """)
+        return context
+
+    @classmethod
+    async def close(cls):
+        if cls._browser:
+            await cls._browser.close()
+            cls._browser = None
+        if cls._playwright:
+            await cls._playwright.stop()
+            cls._playwright = None
+
+
+def _cleanup_browser():
+    """进程退出时清理浏览器实例"""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(BrowserManager.close())
+        else:
+            loop.run_until_complete(BrowserManager.close())
+    except Exception:
+        pass
+
+
+atexit.register(_cleanup_browser)
 
 
 class MissavCrawler:
@@ -25,62 +85,38 @@ class MissavCrawler:
         }
 
     async def parse_video(self, url: str) -> dict:
-        """
-        解析视频页面，提取视频信息
+        """解析视频页面，提取视频信息。复用浏览器实例 + 并行提取元数据。"""
+        context = await BrowserManager.new_context()
+        page = await context.new_page()
 
-        Args:
-            url: missav 视频页面 URL
+        try:
+            print(f"正在访问: {url}")
+            await page.goto(url, wait_until='domcontentloaded', timeout=60000)
 
-        Returns:
-            包含视频信息的字典
-        """
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=['--disable-blink-features=AutomationControlled']
-            )
-            context = await browser.new_context(
-                user_agent=self.headers['User-Agent'],
-                viewport={'width': 1920, 'height': 1080}
-            )
-            # 隐藏自动化标记，绕过 Cloudflare bot 检测
-            await context.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', { get: () => false });
-                window.chrome = { runtime: {} };
-                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-                Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
-            """)
-            page = await context.new_page()
+            # 处理 Cloudflare 质询
+            await self._handle_cloudflare(page)
 
-            try:
-                # 导航到页面
-                print(f"正在访问: {url}")
-                await page.goto(url, wait_until='domcontentloaded', timeout=60000)
+            # 并行提取标题、封面、元数据（省 ~1-2s）
+            title_task = asyncio.create_task(self._extract_title(page))
+            cover_task = asyncio.create_task(self._extract_cover(page))
+            metadata_task = asyncio.create_task(self._extract_metadata(page))
 
-                # 处理 Cloudflare 质询（多策略）
-                await self._handle_cloudflare(page)
+            title = await title_task
+            cover = await cover_task
+            metadata = await metadata_task
 
-                # 提取标题
-                title = await self._extract_title(page)
+            # m3u8 捕获（依赖页面交互，不能并行）
+            m3u8_url = await self._capture_m3u8(page, url)
 
-                # 提取封面图
-                cover = await self._extract_cover(page)
+            return {
+                'title': title,
+                'cover': cover,
+                'm3u8_url': m3u8_url,
+                **metadata
+            }
 
-                # 提取元数据
-                metadata = await self._extract_metadata(page)
-
-                # 监听 m3u8 请求
-                m3u8_url = await self._capture_m3u8(page, url)
-
-                return {
-                    'title': title,
-                    'cover': cover,
-                    'm3u8_url': m3u8_url,
-                    **metadata
-                }
-
-            finally:
-                await browser.close()
+        finally:
+            await context.close()
 
     async def _handle_cloudflare(self, page: Page):
         """处理 Cloudflare 质询 - stealth 模式下自动通过"""
@@ -226,37 +262,46 @@ class MissavCrawler:
         return metadata
 
     async def _capture_m3u8(self, page: Page, referer: str) -> str | None:
-        """捕获页面发起的 m3u8 请求"""
-        m3u8_url = None
-        m3u8_future = asyncio.Future()
+        """捕获页面发起的 m3u8 请求。缩短超时 + 重试一次。"""
+        for attempt in range(2):
+            m3u8_url = None
+            m3u8_future = asyncio.Future()
 
-        def handle_request(request):
-            nonlocal m3u8_url
-            if ".m3u8" in request.url and not m3u8_future.done():
-                print(f"捕获到 m3u8 请求: {request.url}")
-                m3u8_url = request.url
-                m3u8_future.set_result(request.url)
+            def handle_request(request):
+                nonlocal m3u8_url
+                if ".m3u8" in request.url and not m3u8_future.done():
+                    print(f"捕获到 m3u8 请求: {request.url}")
+                    m3u8_url = request.url
+                    m3u8_future.set_result(request.url)
 
-        page.on("request", handle_request)
+            page.on("request", handle_request)
 
-        # 尝试点击播放按钮
-        try:
-            play_btn = await page.query_selector('.plyr__control--overlaid')
-            if play_btn:
-                print("点击播放按钮...")
-                await play_btn.click(timeout=5000, force=True)
-        except Exception as e:
-            print(f"点击播放按钮失败: {e}")
+            # 点击播放按钮触发请求
+            try:
+                play_btn = await page.query_selector('.plyr__control--overlaid')
+                if play_btn:
+                    print("点击播放按钮...")
+                    await play_btn.click(timeout=5000, force=True)
+            except Exception as e:
+                print(f"点击播放按钮失败: {e}")
 
-        # 等待 m3u8 请求
-        try:
-            await asyncio.wait_for(m3u8_future, timeout=20)
-        except asyncio.TimeoutError:
-            print("超时: 未捕获到 m3u8 请求")
-        finally:
-            page.remove_listener("request", handle_request)
+            # 等待 m3u8（超时从 20s 缩短到 10s）
+            try:
+                await asyncio.wait_for(m3u8_future, timeout=10)
+            except asyncio.TimeoutError:
+                if attempt == 0:
+                    print("m3u8 捕获超时，刷新页面重试...")
+                    await page.reload(wait_until='domcontentloaded', timeout=30000)
+                    await page.wait_for_timeout(2000)
+                else:
+                    print("m3u8 捕获失败（重试耗尽）")
+            finally:
+                page.remove_listener("request", handle_request)
 
-        return m3u8_url
+            if m3u8_url:
+                return m3u8_url
+
+        return None
 
 
 class VideoDownloader:

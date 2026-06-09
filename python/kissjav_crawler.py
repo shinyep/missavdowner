@@ -40,77 +40,64 @@ class KissjavCrawler:
 
     async def parse_video(self, url: str) -> dict:
         """
-        解析视频页面，提取视频信息
-
-        Args:
-            url: kissjav 视频页面 URL
-
-        Returns:
-            包含视频信息的字典
+        解析视频页面，提取视频信息。
+        优先 httpx 直抓（快），Cloudflare 拦截时回退 Playwright（慢但能过 CF）。
         """
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=['--disable-blink-features=AutomationControlled']
-            )
-            context = await browser.new_context(
-                user_agent=self.headers['User-Agent'],
-                viewport={'width': 1920, 'height': 1080}
-            )
-            # 隐藏自动化标记
-            await context.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', { get: () => false });
-                window.chrome = { runtime: {} };
-                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-                Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
-            """)
-            page = await context.new_page()
+        html_content = None
 
-            try:
-                # 导航到页面
-                print(f"[Kissjav] 正在访问: {url}")
-                await page.goto(url, wait_until='domcontentloaded', timeout=60000)
+        # 快速路径：httpx 直抓静态 HTML
+        try:
+            async with httpx.AsyncClient(
+                headers=self.headers,
+                timeout=httpx.Timeout(15),
+                follow_redirects=True,
+            ) as client:
+                resp = await client.get(url)
+                if resp.status_code == 200 and 'flashvars' in resp.text:
+                    html_content = resp.text
+                    print(f"[Kissjav] httpx 直抓成功 ({len(html_content)} bytes)")
+        except Exception as e:
+            print(f"[Kissjav] httpx 失败: {e}，回退 Playwright")
 
-                # 处理 Cloudflare 质询
-                await self._handle_cloudflare(page)
+        # 慢速路径：Playwright（Cloudflare 保护时）
+        if html_content is None:
+            html_content = await self._fetch_with_playwright(url)
 
-                # 等待页面加载完成
-                await page.wait_for_timeout(3000)
+        # 从 HTML 提取数据（两种路径共用）
+        flashvars = self._extract_flashvars_from_html(html_content)
+        title = self._extract_title_from_html(html_content)
 
-                # 从 HTML 源码中提取 flashvars 数据（最可靠的方式）
-                html_content = await page.content()
-                flashvars = self._extract_flashvars_from_html(html_content)
+        cover = flashvars.get('preview_url', '')
+        if cover and cover.startswith('//'):
+            cover = 'https:' + cover
 
-                # 提取标题
-                title = self._extract_title_from_html(html_content) or await self._extract_title(page)
+        video_url = flashvars.get('video_url', '')
+        metadata = self._extract_metadata_from_flashvars(flashvars)
 
-                # 提取封面
-                cover = flashvars.get('preview_url', '')
-                if cover and cover.startswith('//'):
-                    cover = 'https:' + cover
+        print(f"[Kissjav] 标题: {title}")
+        print(f"[Kissjav] 视频: {video_url[:80]}...")
 
-                # 提取视频 URL
-                video_url = flashvars.get('video_url', '')
+        return {
+            'title': title,
+            'cover': cover,
+            'm3u8_url': None,
+            'video_url': video_url,
+            **metadata
+        }
 
-                # 提取元数据
-                metadata = self._extract_metadata_from_flashvars(flashvars)
-
-                print(f"[Kissjav] 标题: {title}")
-                print(f"[Kissjav] 封面: {cover[:80]}...")
-                print(f"[Kissjav] 视频: {video_url[:80]}...")
-                print(f"[Kissjav] 演员: {metadata.get('actresses', [])}")
-                print(f"[Kissjav] 标签: {metadata.get('tags', [])}")
-
-                return {
-                    'title': title,
-                    'cover': cover,
-                    'm3u8_url': None,
-                    'video_url': video_url,
-                    **metadata
-                }
-
-            finally:
-                await browser.close()
+    async def _fetch_with_playwright(self, url: str) -> str:
+        """Playwright 兜底：处理 Cloudflare 质询。复用 BrowserManager 浏览器实例。"""
+        from crawler import BrowserManager
+        context = await BrowserManager.new_context()
+        page = await context.new_page()
+        try:
+            print(f"[Kissjav] Playwright 访问: {url}")
+            await page.goto(url, wait_until='domcontentloaded', timeout=60000)
+            await self._handle_cloudflare(page)
+            await page.wait_for_timeout(1000)
+            return await page.content()
+        finally:
+            await context.close()
 
     def _extract_flashvars_from_html(self, html: str) -> dict:
         """
