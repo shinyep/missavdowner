@@ -498,6 +498,11 @@ function setupIPC() {
       let referer = 'https://missav.ws/'
       if (url.includes('kissjav.com')) {
         referer = 'https://kissjav.com/'
+      } else if (url.includes('kkc3.com')) {
+        referer = 'https://www.kkc3.com/'
+      } else if (url.includes('buondua')) {
+        // buondua CDN 域名：cdn.buondua.us / i2.buondua.us / cdn.buondua.com
+        referer = 'https://buondua.com/'
       }
       const response = await net.fetch(url, {
         headers: {

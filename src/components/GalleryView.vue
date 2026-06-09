@@ -5,7 +5,7 @@
         <div class="max-w-xl mx-auto w-full flex flex-col gap-6">
           <div class="flex flex-col gap-1">
             <h1 class="font-headline text-2xl font-bold leading-tight text-on-surface">图集图片下载</h1>
-            <p class="text-on-surface-variant text-sm">粘贴图片站点图集链接，先解析再按需下载</p>
+            <p class="text-on-surface-variant text-sm">粘贴图片站点图集链接，支持 4khd / szzs / kkc3 / buondua</p>
           </div>
 
           <div class="flex flex-col gap-3">
@@ -15,7 +15,7 @@
                 v-model="galleryUrl"
                 aria-label="粘贴图集链接"
                 class="w-full h-24 bg-surface-container-highest rounded-md p-3 text-on-surface placeholder:text-outline-variant resize-none font-body text-sm border-2 border-transparent focus:border-primary focus:outline-none transition-all"
-                placeholder="在此粘贴图集链接，例如 szzs.uuss.uk/content/..."
+                placeholder="在此粘贴图集链接，支持 4khd / szzs / kkc3.com 等站点"
                 @keydown.enter.prevent="parseGallery"
               />
             </div>
@@ -52,14 +52,28 @@
           <!-- 解析结果 -->
           <section v-if="parseResult" class="flex flex-col gap-3 p-4 bg-surface-container-low rounded-md border border-outline-variant/10">
             <h3 class="font-headline text-sm font-bold text-on-surface">解析结果</h3>
-            <div class="flex flex-col gap-1.5 text-sm">
-              <div class="flex items-center gap-2">
-                <span class="text-on-surface-variant">标题：</span>
-                <span class="text-on-surface font-medium">{{ parseResult.title }}</span>
+            <div class="flex gap-4">
+              <!-- 首张预览图 -->
+              <div class="w-32 h-24 shrink-0 rounded-md overflow-hidden bg-surface-container-highest border border-outline-variant/10">
+                <img
+                  v-if="previewImage"
+                  :src="previewImage"
+                  class="w-full h-full object-cover"
+                  alt="预览"
+                />
+                <div v-else class="w-full h-full flex items-center justify-center">
+                  <span class="material-symbols-outlined text-on-surface-variant text-2xl opacity-40">image</span>
+                </div>
               </div>
-              <div class="flex items-center gap-2">
-                <span class="text-on-surface-variant">图片数量：</span>
-                <span class="text-primary font-semibold">{{ parseResult.image_count }} 张</span>
+              <div class="flex flex-col gap-1.5 text-sm flex-1 min-w-0">
+                <div class="flex items-center gap-2">
+                  <span class="text-on-surface-variant shrink-0">标题：</span>
+                  <span class="text-on-surface font-medium truncate">{{ parseResult.title }}</span>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span class="text-on-surface-variant shrink-0">图片数量：</span>
+                  <span class="text-primary font-semibold">{{ parseResult.image_count }} 张</span>
+                </div>
               </div>
             </div>
 
@@ -121,7 +135,7 @@
             <div class="flex flex-col gap-2.5 text-xs text-on-surface-variant">
               <div class="flex items-start gap-2">
                 <span class="material-symbols-outlined text-primary text-sm mt-0.5">looks_one</span>
-                <span>粘贴 4khd / szzs 等图站链接，点击「解析图集」获取图集信息</span>
+                <span>粘贴 4khd / szzs / kkc3 等图站链接，点击「解析图集」获取图集信息</span>
               </div>
               <div class="flex items-start gap-2">
                 <span class="material-symbols-outlined text-primary text-sm mt-0.5">looks_two</span>
@@ -241,6 +255,7 @@ const isDownloading = ref(false)
 const errorMsg = ref('')
 const successMsg = ref('')
 const parseResult = ref<GalleryParseResult | null>(null)
+const previewImage = ref('')
 const downloadQueue = ref<DownloadTask[]>([])
 const novelProjectPath = ref('F:\\novel')
 const proxy = ref('')
@@ -317,6 +332,7 @@ async function parseGallery() {
   errorMsg.value = ''
   successMsg.value = ''
   parseResult.value = null
+  previewImage.value = ''
 
   try {
     const result = await window.electronAPI.gallery.parse({
@@ -324,6 +340,12 @@ async function parseGallery() {
       proxy: proxy.value
     })
     parseResult.value = result
+    // 拉取首张图片作为预览
+    previewImage.value = ''
+    if (result.image_urls?.length > 0 && window.electronAPI?.app?.fetchImage) {
+      const img = await window.electronAPI.app.fetchImage(result.image_urls[0])
+      if (img) previewImage.value = img
+    }
   } catch (err: any) {
     errorMsg.value = err.message || '图集解析失败'
     parseResult.value = null

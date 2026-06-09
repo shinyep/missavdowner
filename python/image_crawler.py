@@ -2,11 +2,13 @@
 """
 图片图集爬虫模块。
 
-参考 F:\novel 的 image_4khd 管理命令，实现 4khd/szzs 图集 URL 转换、分页提取、
-图片下载，并保留通用图片站点的基础提取能力。
+参考 F:\novel 的 image_4khd / image_kkc3 管理命令，实现 4khd/szzs/kkc3 图集 URL 转换、
+分页提取、图片下载，并保留通用图片站点的基础提取能力。
 """
 import asyncio
+import html
 import os
+import random
 import re
 import time
 from dataclasses import dataclass
@@ -39,6 +41,11 @@ USER_AGENT = (
 
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".jfif")
 
+# 图集页面在 www.kkc3.com，实际图片 CDN 在 image.kkc3.com（data-src 已是绝对 URL）
+KKC3_BASE_URL = "https://www.kkc3.com/"
+
+BUONdua_BASE_URL = "https://buondua.com/"
+
 
 @dataclass
 class GalleryParseResult:
@@ -67,6 +74,15 @@ class ImageGalleryCrawler:
 
     async def parse_gallery(self, gallery_url: str) -> GalleryParseResult:
         page_url = self._normalize_gallery_url(gallery_url)
+
+        # kkc3.com 需要 Playwright JS 执行来提取 data-src 属性，走独立解析路径
+        if self._is_kkc3_url(page_url):
+            return await self._parse_kkc3_gallery(page_url)
+
+        # buondua.com 走 Playwright + BeautifulSoup 解析路径
+        if self._is_buondua_url(page_url):
+            return await self._parse_buondua_gallery(page_url)
+
         html = await self._load_page_html(gallery_url, page_url)
         soup = BeautifulSoup(html, "html.parser")
         title = self._extract_gallery_title(soup, page_url)
@@ -205,6 +221,394 @@ class ImageGalleryCrawler:
         if ("szzs.uuss.uk" in parsed.netloc or "4khd" in parsed.netloc) and "/gallery/" in gallery_url:
             return gallery_url.rstrip("/").replace("/gallery/", "/content/") + ".html"
         return gallery_url
+
+    # ---- kkc3.com 专用解析 ----
+
+    @staticmethod
+    def _is_kkc3_url(url: str) -> bool:
+        """检测是否为 kkc3.com 图集链接"""
+        return "kkc3.com" in urlparse(url).netloc
+
+    async def _parse_kkc3_gallery(self, gallery_url: str) -> GalleryParseResult:
+        """使用 httpx + BeautifulSoup 解析 kkc3.com 图集。
+
+        kkc3 图片在静态 HTML 的 src/data-src 属性中，无需 Playwright。
+        分页通过 a.page-next 链接跟踪。
+        """
+        all_image_urls: list[str] = []
+        seen_urls: set[str] = set()
+        gallery_title = ""
+
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Referer": KKC3_BASE_URL,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+        client_options = self._client_options(headers)
+
+        async with httpx.AsyncClient(**client_options) as client:
+            current_url = gallery_url
+            crawled_urls: set[str] = {current_url.split("#")[0]}
+            page_count = 0
+            max_pages = 50
+
+            while current_url and page_count < max_pages:
+                if page_count > 0:
+                    await asyncio.sleep(random.uniform(0.5, 1.5))
+
+                page_count += 1
+
+                # 抓取页面
+                html_content = await self._kkc3_fetch(client, current_url)
+                soup = BeautifulSoup(html_content, "html.parser")
+
+                # 首页提取标题
+                if page_count == 1:
+                    gallery_title = self._extract_kkc3_title_from_soup(soup)
+                    if not gallery_title:
+                        raise RuntimeError("未能从 kkc3 页面提取图集标题")
+
+                # 提取当前页图片
+                page_images = self._extract_kkc3_images_from_soup(soup, current_url)
+                for img_url in page_images:
+                    if img_url not in seen_urls:
+                        seen_urls.add(img_url)
+                        all_image_urls.append(img_url)
+
+                if not page_images and page_count > 1:
+                    break  # 后续页无图即结束
+
+                # 找下一页
+                next_link = soup.select_one("a.page-next")
+                if next_link and next_link.get("href"):
+                    next_url = urljoin(current_url, next_link["href"])
+                    clean_next = next_url.split("#")[0]
+                    if clean_next in crawled_urls:
+                        break
+                    crawled_urls.add(clean_next)
+                    current_url = next_url
+                else:
+                    break
+
+            if not all_image_urls:
+                raise RuntimeError("未从 kkc3 图集页面提取到图片链接")
+
+            return GalleryParseResult(
+                title=gallery_title,
+                page_url=gallery_url,
+                image_urls=all_image_urls,
+            )
+
+    async def _kkc3_fetch(self, client: httpx.AsyncClient, url: str) -> str:
+        """用 httpx 抓取 kkc3 页面 HTML"""
+        for attempt in range(3):
+            try:
+                resp = await client.get(url, follow_redirects=True)
+                resp.raise_for_status()
+                return resp.text
+            except Exception:
+                if attempt < 2:
+                    await asyncio.sleep(random.uniform(1, 3))
+                    continue
+                raise
+        return ""
+
+    def _extract_kkc3_images_from_soup(self, soup: BeautifulSoup, base_url: str) -> list[str]:
+        """从 BeautifulSoup 提取 kkc3 图片 URL。
+
+        真实 DOM：div.image-loading-box > img[src][data-src][data-photo-num]
+        过滤广告容器 .related-files / .ad-container / .cpa-chaturbate
+        """
+        items: list[dict] = []
+        seen: set[str] = set()
+
+        # 主路径：.image-loading-box
+        for box in soup.select(".image-loading-box"):
+            if box.find_parent(class_="related-files") or box.find_parent(class_="ad-container"):
+                continue
+            img = box.find("img")
+            if not img:
+                continue
+            url = (img.get("data-src") or img.get("src") or "").strip()
+            if not url or url.startswith("data:") or "/jw-photos/" not in url:
+                continue
+            if url in seen:
+                continue
+            seen.add(url)
+            num = int(img.get("data-photo-num", 0) or 0)
+            items.append({"url": url, "num": num})
+
+        # 兜底：直接搜 img[data-src]
+        if not items:
+            for img in soup.select("img[data-src]"):
+                if img.find_parent(class_="related-files") or img.find_parent(class_="ad-container") or img.find_parent(class_="cpa-chaturbate"):
+                    continue
+                url = (img.get("data-src") or "").strip()
+                if not url or url.startswith("data:") or "/jw-photos/" not in url:
+                    continue
+                if url in seen:
+                    continue
+                seen.add(url)
+                num = int(img.get("data-photo-num", 0) or 0)
+                items.append({"url": url, "num": num})
+
+        # 按 data-photo-num 排序保证顺序
+        items.sort(key=lambda x: x["num"])
+        return [item["url"] for item in items]
+
+    def _extract_kkc3_title_from_soup(self, soup: BeautifulSoup) -> str:
+        """从 kkc3 BeautifulSoup 提取标题。优先 h1，回退 <title>。"""
+        # 优先 h1
+        h1 = soup.select_one("h1")
+        if h1 and h1.get_text(strip=True):
+            return h1.get_text(strip=True)
+
+        # 回退 <title>
+        title_tag = soup.title
+        if title_tag:
+            raw = title_tag.get_text(strip=True)
+            for sep in (" | 咔咔西三", " - 咔咔西三", " | KKC3", " - KKC3"):
+                idx = raw.find(sep)
+                if idx > 0:
+                    return raw[:idx].strip()
+            return raw.strip()
+
+        return ""
+
+    # ---- buondua.com 专用解析 ----
+
+    @staticmethod
+    def _is_buondua_url(url: str) -> bool:
+        return "buondua.com" in urlparse(url).netloc
+
+    async def _parse_buondua_gallery(self, gallery_url: str) -> GalleryParseResult:
+        """使用 httpx + BeautifulSoup 解析 buondua.com 图集。
+
+        buondua 图片在静态 HTML 的 src 属性中，无需 Playwright/JS 执行。
+        直接用 httpx 抓取 HTML，速度快 10 倍以上。
+        """
+        all_image_urls: list[str] = []
+        seen_urls: set[str] = set()
+        gallery_title = ""
+
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Referer": "https://buondua.com/",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        }
+
+        client_options = self._client_options(headers)
+
+        async with httpx.AsyncClient(**client_options) as client:
+            # 抓取首页
+            html_content = await self._buondua_fetch(client, gallery_url)
+            soup = BeautifulSoup(html_content, "html.parser")
+
+            if self._is_buondua_blocked(soup):
+                raise RuntimeError("buondua.com 访问被拦截，请稍后重试或配置代理")
+
+            gallery_title = self._extract_buondua_title(soup)
+            if not gallery_title:
+                raise RuntimeError("未能从 buondua 页面提取图集标题")
+
+            # 提取首页图片
+            for img_url in self._extract_buondua_images_from_soup(soup, gallery_url):
+                if img_url not in seen_urls:
+                    seen_urls.add(img_url)
+                    all_image_urls.append(img_url)
+
+            # 检测总页数，循环加载
+            total_pages = self._detect_buondua_total_pages(gallery_title, html_content, soup)
+            base_url_clean = gallery_url.split("?")[0].split("#")[0].rstrip("/")
+            max_pages = max(total_pages, 2)
+            empty_streak = 0
+
+            for page_num in range(2, max_pages + 10):
+                page_url = f"{base_url_clean}?page={page_num}"
+                try:
+                    await asyncio.sleep(random.uniform(1, 3))
+                    page_html = await self._buondua_fetch(client, page_url)
+                    page_soup = BeautifulSoup(page_html, "html.parser")
+                    if self._is_buondua_blocked(page_soup):
+                        break
+                    new_count = 0
+                    for img_url in self._extract_buondua_images_from_soup(page_soup, gallery_url):
+                        if img_url not in seen_urls:
+                            seen_urls.add(img_url)
+                            all_image_urls.append(img_url)
+                            new_count += 1
+                    if new_count == 0:
+                        empty_streak += 1
+                        if empty_streak >= 2:
+                            break
+                    else:
+                        empty_streak = 0
+                except Exception:
+                    empty_streak += 1
+                    if empty_streak >= 2:
+                        break
+
+            if not all_image_urls:
+                raise RuntimeError("未从 buondua 图集页面提取到图片链接")
+
+            return GalleryParseResult(
+                title=gallery_title,
+                page_url=gallery_url,
+                image_urls=all_image_urls,
+            )
+
+    async def _buondua_fetch(self, client: httpx.AsyncClient, url: str) -> str:
+        """用 httpx 抓取 buondua 页面 HTML，带重试"""
+        for attempt in range(3):
+            try:
+                resp = await client.get(url, follow_redirects=True)
+                resp.raise_for_status()
+                return resp.text
+            except Exception:
+                if attempt < 2:
+                    await asyncio.sleep(random.uniform(2, 5))
+                    continue
+                raise
+        return ""
+
+    @staticmethod
+    def _is_buondua_blocked(soup: BeautifulSoup) -> bool:
+        """检测 buondua 页面是否被反爬拦截"""
+        title = soup.title.get_text() if soup.title else ""
+        if "blocked" in title.lower() or "access denied" in title.lower():
+            return True
+        body_text = soup.get_text()[:500]
+        if "Sorry, you have been blocked" in body_text:
+            return True
+        return False
+
+    def _extract_buondua_title(self, soup: BeautifulSoup) -> str:
+        """从 buondua 页面提取图集标题，清理站点后缀和页码标记
+
+        原始：'[AI Enhanced] DJAWA Photo: Yudi (유디) – Succubus Princess (39 photos)  - ( Page 1 / 2 )'
+        清理后：'[AI Enhanced] DJAWA Photo: Yudi (유디) – Succubus Princess'
+        """
+        for selector in [".article-header h1", "h1", "title"]:
+            el = soup.select_one(selector)
+            if el:
+                raw = el.get_text(strip=True)
+                # 去掉页码后缀：( Page 1 / 2 )
+                raw = re.sub(r"\s*[-–]?\s*\(?\s*Page\s+\d+\s*/\s*\d+\s*\)?\s*$", "", raw, flags=re.IGNORECASE)
+                # 去掉照片数量后缀：(39 photos)
+                raw = re.sub(r"\s*\(\d+\s*[Pp]hotos?\s*\)\s*$", "", raw)
+                # 去掉 Buondua 站点名
+                raw = re.sub(r"\s*[-–]\s*Buondua\s*$", "", raw)
+                raw = html.unescape(raw)
+                raw = re.sub(r"\s+", " ", raw).strip()
+                if len(raw) > 2:
+                    return raw
+        return ""
+
+    def _extract_buondua_images_from_soup(self, soup: BeautifulSoup, base_url: str) -> list[str]:
+        """从 BeautifulSoup 对象中提取 buondua 图片 URL。
+
+        真实 DOM 结构：
+          div.article-fulltext > p > img[src][loading="lazy"][referrerPolicy="strict-origin"]
+        图片 CDN 域名：cdn.buondua.us / i2.buondua.us / cdn.buondua.com 等
+        广告容器：ins.adsbyexoclick / div[class*="Sponsored ads"]
+        底部推荐：div.bottom-articles / div.footer
+        """
+        found: list[str] = []
+        seen: set[str] = set()
+
+        # 只从 .article-fulltext 内提取（正文区域）
+        content_div = soup.select_one(".article-fulltext")
+        if not content_div:
+            return found
+
+        for img in content_div.find_all("img"):
+            img_src = img.get("src")
+            if not img_src:
+                continue
+
+            # 过滤占位符和 data URI
+            if img_src.startswith("data:"):
+                continue
+
+            # 过滤广告 CDN 域名
+            lower = img_src.lower()
+            if any(ad in lower for ad in ["bkcdn.net", "juicyads", "exoclick", "magsrv"]):
+                continue
+            if any(ex in lower for ex in [
+                "logo", "icon", "avatar", "profile", "banner",
+                "header", "footer", "sidebar", "widget",
+                "cropped-", "thumbnail", "thumb", "placeholder",
+                "loading", "pixel", "sponsor", "adsbyexoclick",
+            ]):
+                continue
+
+            # 验证图片扩展名（支持查询参数）
+            clean = lower.split("?")[0]
+            if not any(clean.endswith(ext) for ext in IMAGE_EXTENSIONS):
+                continue
+
+            absolute_url = urljoin(base_url, img_src)
+            if absolute_url not in seen:
+                seen.add(absolute_url)
+                found.append(absolute_url)
+
+        return found
+
+    def _detect_buondua_total_pages(self, title: str, html_content: str, soup: BeautifulSoup) -> int:
+        """检测 buondua 图集总页数（三种策略）
+
+        标题示例：'[AI Enhanced] DJAWA Photo: Yudi (유디) – Succubus Princess (39 photos)  - ( Page 1 / 2 )'
+        """
+        total = 1
+
+        # 策略1：从标题中提取（优先精确页码，再估算）
+        title_patterns = [
+            r"\(\s*Page\s+\d+\s*/\s*(\d+)\s*\)",   # ( Page 1 / 2 )
+            r"Page\s+\d+\s*of\s+(\d+)",             # Page 1 of 2
+        ]
+        for pattern in title_patterns:
+            match = re.search(pattern, title or "", re.IGNORECASE)
+            if match:
+                detected = int(match.group(1))
+                if "P\\s*\\)" in pattern:
+                    detected = max(1, (detected + 19) // 20)  # 每页约20张
+                if detected > total:
+                    total = detected
+                    break
+
+        # 策略2：从页面内容中提取
+        if total == 1:
+            for pattern in [r"Page\s+\d+\s*/\s*(\d+)", r"of\s+(\d+)", r"共\s*(\d+)\s*页"]:
+                match = re.search(pattern, html_content, re.IGNORECASE)
+                if match:
+                    detected = int(match.group(1))
+                    if detected > total:
+                        total = detected
+                        break
+
+        # 策略3：从分页链接中提取
+        if total == 1:
+            for selector in [".pagination-link", ".pagination a", ".page-link"]:
+                for link in soup.select(selector):
+                    href = link.get("href", "")
+                    page_num = None
+                    if "?page=" in href:
+                        try:
+                            page_num = int(href.split("?page=")[1].split("&")[0])
+                        except (ValueError, IndexError):
+                            pass
+                    elif "/page/" in href:
+                        try:
+                            page_num = int(href.split("/page/")[1].split("/")[0].split("?")[0])
+                        except (ValueError, IndexError):
+                            pass
+                    if page_num and page_num > total:
+                        total = page_num
+
+        return total
+
+    # ---- 通用 HTML 解析 ----
 
     def _extract_gallery_title(self, soup: BeautifulSoup, page_url: str) -> str:
         selectors = [
