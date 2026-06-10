@@ -1,4 +1,4 @@
-"""
+﻿"""
 Flask HTTP server - provides API for Electron app.
 Supports missav.ws and kissjav.com
 """
@@ -309,7 +309,7 @@ def start_download_to_novel():
                 download_tasks[task_id]['detail'] = 'Importing...'
                 try:
                     cover = video_info.get('cover', '')
-                    result = import_video_to_novel(novel_project_path, output_path, safe_title, cover_url=cover)
+                    result = import_video_to_novel(novel_project_path, output_path, safe_title, cover_url=cover, source=source)
                     if result['success']:
                         download_tasks[task_id]['novel_video_id'] = result.get('video_id')
                         # Poll transcode progress
@@ -538,3 +538,4 @@ if __name__ == '__main__':
     args = parser.parse_args()
     print(f"Starting server on port {args.port}")
     app.run(host='127.0.0.1', port=args.port, debug=False)
+

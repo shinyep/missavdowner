@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Novel project video/image import helpers.
 """
@@ -6,7 +6,7 @@ import os
 import sys
 
 
-def import_video_to_novel(novel_project_path: str, output_path: str, title: str, cover_url: str = '') -> dict:
+def import_video_to_novel(novel_project_path: str, output_path: str, title: str, cover_url: str = '', source: str = 'missav') -> dict:
     novel_backend = os.path.join(novel_project_path, 'backend')
     venv_python = os.path.join(novel_backend, 'venv', 'Scripts', 'python.exe')
     if not os.path.exists(venv_python):
@@ -35,15 +35,23 @@ def import_video_to_novel(novel_project_path: str, output_path: str, title: str,
         "",
     ]
 
+    # 根据来源选择正确的 Referer
+    referer_map = {
+        'missav': 'https://missav.ws/',
+        'kissjav': 'https://kissjav.com/',
+    }
+    referer_url = referer_map.get(source, 'https://missav.ws/')
+
     if cover_url:
         lines += [
             f"cover_url = r'{cu}'",
+            f"referer_url = r'{referer_url}'",
             "if not gallery.cover_image and cover_url:",
             "    try:",
             "        import urllib.request, ssl",
             "        ctx = ssl._create_unverified_context()",
             "        req = urllib.request.Request(cover_url, headers={",
-            "            'Referer': 'https://kissjav.com/',",
+            "            'Referer': referer_url,",
             "            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'",
             "        })",
             "        with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:",
@@ -192,3 +200,4 @@ def import_images_to_novel(novel_project_path: str, title: str, image_paths: lis
         return {'success': False, 'gallery_id': None, 'message': 'Import timeout'}
     except Exception as e:
         return {'success': False, 'gallery_id': None, 'message': f'Import exception: {str(e)}'}
+
