@@ -1,4 +1,4 @@
-﻿"""
+"""
 Flask HTTP server - provides API for Electron app.
 Supports missav.ws and kissjav.com
 """
@@ -101,6 +101,60 @@ def _phase_title(phase):
         'transcoding': '转码中',
         'cleaning': '清理临时文件',
     }.get(phase, phase or '')
+
+
+def _poll_transcode(task_id, novel_project_path, video_id):
+    """Poll Django GalleryVideo transcode progress."""
+    import subprocess
+    novel_backend = os.path.join(novel_project_path, 'backend')
+    venv_python = os.path.join(novel_backend, 'venv', 'Scripts', 'python.exe')
+    if not os.path.exists(venv_python):
+        venv_python = 'python'
+
+    download_tasks[task_id]['phase'] = 'transcoding'
+    download_tasks[task_id]['phaseTitle'] = _phase_title('transcoding')
+    download_tasks[task_id]['detail'] = 'Waiting for transcode...'
+
+    be = novel_backend.replace('\\', '\\\\')
+    poll_script = (
+        "import os,sys;"
+        f"sys.path.insert(0,r'{be}');"
+        "os.environ.setdefault('DJANGO_SETTINGS_MODULE','novel_project.settings');"
+        "import django;django.setup();"
+        "from api.models import GalleryVideo;"
+        f"v=GalleryVideo.objects.filter(id={video_id}).first();"
+        "print(f'STATUS:{v.status}:PROGRESS:{v.progress}') if v else print('NOT_FOUND')"
+    )
+
+    start_time = time.time()
+    while time.time() - start_time < 1800:  # max 30 min
+        try:
+            proc = subprocess.run(
+                [venv_python, '-c', poll_script],
+                capture_output=True, text=True, timeout=10,
+                cwd=novel_backend,
+                env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}
+            )
+            stdout = proc.stdout.strip()
+            m = re.search(r'STATUS:(\w+):PROGRESS:(\d+)', stdout)
+            if m:
+                vid_status = m.group(1)
+                vid_progress = int(m.group(2))
+                download_tasks[task_id]['transcodeProgress'] = vid_progress
+                download_tasks[task_id]['detail'] = f'Transcoding: {vid_progress}%'
+                if vid_status in ('completed', 'ready', 'failed'):
+                    if vid_status == 'failed':
+                        download_tasks[task_id]['detail'] = 'Transcode failed'
+                    else:
+                        download_tasks[task_id]['transcodeProgress'] = 100
+                        download_tasks[task_id]['detail'] = 'Transcode completed'
+                    break
+            elif 'NOT_FOUND' in stdout:
+                download_tasks[task_id]['detail'] = f'Video {video_id} not found'
+                break
+        except Exception as e:
+            print(f'[Poll transcode] Error: {e}')
+        time.sleep(3)
 
 # ==================== API Routes ====================
 
@@ -258,12 +312,19 @@ def start_download_to_novel():
                     result = import_video_to_novel(novel_project_path, output_path, safe_title, cover_url=cover)
                     if result['success']:
                         download_tasks[task_id]['novel_video_id'] = result.get('video_id')
+                        # Poll transcode progress
+                        vid = result.get('video_id')
+                        if vid:
+                            _poll_transcode(task_id, novel_project_path, vid)
                         download_tasks[task_id]['detail'] = result['message']
                     else:
                         download_tasks[task_id]['detail'] = result['message'] + (' stdout=' + result.get('stdout','')[:80] if result.get('stdout') else '')
                 except Exception as _e:
                     download_tasks[task_id]['detail'] = f'Import error: {str(_e)[:200]}'
 
+                download_tasks[task_id]['phase'] = 'completed'
+                download_tasks[task_id]['phaseTitle'] = ''
+                download_tasks[task_id]['detail'] = ''
                 download_tasks[task_id]['status'] = 'completed'
                 _save_to_history(task_id, video_info, filename, output_path, 'novel', source)
             except Exception as e:
