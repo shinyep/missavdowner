@@ -7,6 +7,7 @@
 """
 import asyncio
 import html
+import json
 import os
 import random
 import re
@@ -39,7 +40,7 @@ USER_AGENT = (
     "Chrome/121.0.0.0 Safari/537.36"
 )
 
-IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".jfif")
+IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".jfif", ".avif", ".heif", ".heic")
 
 # 图集页面在 www.kkc3.com，实际图片 CDN 在 image.kkc3.com（data-src 已是绝对 URL）
 KKC3_BASE_URL = "https://www.kkc3.com/"
@@ -82,6 +83,13 @@ class ImageGalleryCrawler:
         # buondua.com 走 Playwright + BeautifulSoup 解析路径
         if self._is_buondua_url(page_url):
             return await self._parse_buondua_gallery(page_url)
+
+        if self._is_photos18_url(page_url):
+            return await self._parse_photos18_gallery(page_url)
+        if self._is_tokyobombers_url(page_url):
+            return await self._parse_tokyobombers_gallery(page_url)
+        if self._is_foamgirl_url(page_url):
+            return await self._parse_foamgirl_gallery(page_url)
 
         html = await self._load_page_html(gallery_url, page_url)
         soup = BeautifulSoup(html, "html.parser")
@@ -201,12 +209,14 @@ class ImageGalleryCrawler:
             return response.text
 
     async def _download_image(self, client: httpx.AsyncClient, image_url: str, referer_url: str) -> bytes:
-        response = await client.get(image_url, headers={"Referer": referer_url, "Accept": "image/webp,image/apng,image/*,*/*;q=0.8"})
+        response = await client.get(image_url, headers={"Referer": referer_url, "Accept": "image/avif,image/heif,image/heif-sequence,image/webp,image/apng,image/*,*/*;q=0.8"})
         response.raise_for_status()
         data = response.content
         if len(data) < 128:
             raise RuntimeError("图片内容过小")
-        if Image is not None:
+        lower_url = image_url.lower().split("?")[0]
+        is_avif = lower_url.endswith(('.avif', '.heif', '.heic'))
+        if Image is not None and not is_avif:
             from io import BytesIO
 
             try:
@@ -374,6 +384,541 @@ class ImageGalleryCrawler:
             return raw.strip()
 
         return ""
+
+    # ---- photos18.com 专用解析 ----
+
+    @staticmethod
+    def _is_photos18_url(url: str) -> bool:
+        return "photos18.com" in urlparse(url).netloc
+
+    async def _parse_photos18_gallery(self, gallery_url: str) -> GalleryParseResult:
+        all_image_urls: list[str] = []
+        seen_urls: set[str] = set()
+        gallery_title = ""
+
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Referer": "https://www.photos18.com/",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        }
+
+        client_options = self._client_options(headers)
+
+        async with httpx.AsyncClient(**client_options) as client:
+            base_url_clean = gallery_url.split("?")[0].split("#")[0].rstrip("/")
+            total_pages = 1
+            visited_pages: set[int] = set()
+            empty_streak = 0
+            first_html = ""
+
+            for page_num in range(1, 51):
+                if page_num > total_pages + 1:
+                    break
+
+                page_url = base_url_clean if page_num == 1 else f"{base_url_clean}?page={page_num}"
+                html_content = await self._photos18_fetch(client, page_url)
+                if page_num == 1 and not html_content:
+                    html_content = await self._load_page_html(gallery_url, page_url)
+                if page_num == 1:
+                    first_html = html_content
+                soup = BeautifulSoup(html_content, "html.parser") if html_content else BeautifulSoup("", "html.parser")
+                visited_pages.add(page_num)
+
+                if not gallery_title:
+                    title_candidate = self._extract_photos18_title(soup)
+                    if title_candidate:
+                        gallery_title = title_candidate
+                        total_pages = max(total_pages, self._detect_photos18_total_pages(gallery_title, total_pages))
+
+                if page_num == 1 and html_content:
+                    json_ld_images = self._extract_photos18_json_ld_images(soup)
+                    if json_ld_images:
+                        for img_url in json_ld_images:
+                            if img_url not in seen_urls:
+                                seen_urls.add(img_url)
+                                all_image_urls.append(img_url)
+                        if total_pages <= 1:
+                            break
+                        continue
+
+                page_images = self._extract_photos18_images_from_soup(soup, page_url) if html_content else []
+                for img_url in page_images:
+                    if img_url not in seen_urls:
+                        seen_urls.add(img_url)
+                        all_image_urls.append(img_url)
+
+                if page_images:
+                    empty_streak = 0
+                else:
+                    empty_streak += 1
+                    if empty_streak >= 2:
+                        break
+
+                if page_num >= total_pages and total_pages > 1:
+                    break
+
+            if not all_image_urls and first_html:
+                fallback_soup = BeautifulSoup(first_html, "html.parser")
+                if not gallery_title:
+                    title_candidate = self._extract_photos18_title(fallback_soup)
+                    if title_candidate:
+                        gallery_title = title_candidate
+                all_image_urls.extend(self._extract_photos18_json_ld_images(fallback_soup))
+                all_image_urls.extend(self._extract_photos18_images_from_soup(fallback_soup, gallery_url))
+                all_image_urls = list(dict.fromkeys(all_image_urls))
+
+            if not all_image_urls:
+                fallback_html = await self._load_page_html(gallery_url, gallery_url)
+                fallback_soup = BeautifulSoup(fallback_html, "html.parser")
+                if not gallery_title:
+                    title_candidate = self._extract_photos18_title(fallback_soup)
+                    if title_candidate:
+                        gallery_title = title_candidate
+                all_image_urls.extend(self._extract_photos18_json_ld_images(fallback_soup))
+                all_image_urls.extend(self._extract_photos18_images_from_soup(fallback_soup, gallery_url))
+                all_image_urls = list(dict.fromkeys(all_image_urls))
+
+            if not all_image_urls:
+                raise RuntimeError("未从 photos18 图集页面提取到图片链接")
+
+            if not gallery_title:
+                gallery_title = f"photos18_{int(time.time())}"
+
+            return GalleryParseResult(title=gallery_title, page_url=gallery_url, image_urls=all_image_urls)
+
+    async def _photos18_fetch(self, client: httpx.AsyncClient, url: str) -> str:
+        for attempt in range(4):
+            try:
+                resp = await client.get(url, follow_redirects=True)
+                if resp.status_code == 429:
+                    retry_after = 3 + attempt * 2
+                    await asyncio.sleep(retry_after)
+                    continue
+                resp.raise_for_status()
+                text = resp.text
+                if "gocheck.php" in text or "goto2.cc/block" in text:
+                    if attempt < 3:
+                        await asyncio.sleep(2 + attempt)
+                        continue
+                    return ""
+                return text
+            except Exception:
+                if attempt < 3:
+                    await asyncio.sleep(1 + attempt)
+                    continue
+                raise
+        return ""
+
+    def _extract_photos18_title(self, soup: BeautifulSoup) -> str:
+        for script in soup.select('script[type="application/ld+json"]'):
+            if not script.string:
+                continue
+            try:
+                data = json.loads(script.string)
+            except Exception:
+                continue
+            title = data.get("headline") or data.get("name") or data.get("description")
+            if title:
+                cleaned = self._clean_title(str(title))
+                if cleaned:
+                    return cleaned
+
+        for selector in ["h1.title", "h1", "title"]:
+            el = soup.select_one(selector)
+            if el and el.get_text(strip=True):
+                cleaned = self._clean_title(el.get_text(" ", strip=True))
+                if cleaned:
+                    return cleaned
+
+        return ""
+
+    def _extract_photos18_json_ld_images(self, soup: BeautifulSoup) -> list[str]:
+        found: list[str] = []
+        for script in soup.select('script[type="application/ld+json"]'):
+            if not script.string:
+                continue
+            try:
+                data = json.loads(script.string)
+            except Exception:
+                continue
+
+            images = []
+
+            main_entity = data.get("mainEntityOfPage")
+            if isinstance(main_entity, dict):
+                candidate = main_entity.get("image")
+                if isinstance(candidate, list):
+                    images = candidate
+                elif isinstance(candidate, dict):
+                    images = [candidate]
+
+            if not images:
+                for item in data.get("itemListElement", []):
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("@type") != "ImageObject":
+                        continue
+                    url = item.get("contentUrl") or item.get("url")
+                    if url:
+                        images.append(item)
+
+            for item in images:
+                url = (item.get("url") if isinstance(item, dict) else None) or ""
+                if not url or url.startswith("data:"):
+                    continue
+                if url in found:
+                    continue
+                found.append(url)
+
+        return found
+
+    def _extract_photos18_images_from_soup(self, soup: BeautifulSoup, base_url: str) -> list[str]:
+        found: list[str] = []
+        seen: set[str] = set()
+
+        for selector in ["#content .imgHolder a", "#content .imgHolder img"]:
+            for element in soup.select(selector):
+                candidate = element.get("href") or element.get("data-src") or element.get("src")
+                if not candidate or candidate.startswith("data:"):
+                    continue
+                lower = candidate.lower()
+                if any(token in lower for token in ("logo", "icon", "avatar", "favicon", "thumbnail", "thumb")):
+                    continue
+                absolute_url = urljoin(base_url, candidate)
+                clean = lower.split("?")[0]
+                if not any(clean.endswith(ext) for ext in IMAGE_EXTENSIONS):
+                    continue
+                if absolute_url in seen:
+                    continue
+                seen.add(absolute_url)
+                found.append(absolute_url)
+
+        if not found:
+            return self._extract_image_urls(soup, base_url)
+
+        return found
+
+    def _extract_photos18_pagination_links(self, soup: BeautifulSoup, page_url: str) -> list[str]:
+        return self._extract_pagination_links(soup, page_url)
+
+    def _detect_photos18_total_pages(self, title: str, fallback: int = 1) -> int:
+        total = fallback
+        match = re.search(r"\(\s*Page\s+\d+\s*/\s*(\d+)\s*\)", title or "", re.IGNORECASE)
+        if match:
+            try:
+                total = max(total, int(match.group(1)))
+            except Exception:
+                pass
+        return max(total, 1)
+
+
+
+    # ---- foamgirl.net 专用解析 ----
+
+    @staticmethod
+    def _is_foamgirl_url(url: str) -> bool:
+        return "foamgirl.net" in urlparse(url).netloc
+
+    async def _parse_foamgirl_gallery(self, gallery_url: str) -> GalleryParseResult:
+        """使用 httpx + BeautifulSoup 解析 foamgirl.net 图集。
+
+        foamgirl 是 WordPress 站点，图片 CDN 在 cdn.foamgirl.net，
+        图片格式为 webp，直接在 img[src] 中，无需 Playwright/JS。
+        分页 URL 格式：/1838332.html -> /1838332_2.html -> /1838332_3.html
+        """
+        all_image_urls: list[str] = []
+        seen_urls: set[str] = set()
+        gallery_title = ""
+
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Referer": "https://foamgirl.net/",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        }
+        client_options = self._client_options(headers)
+
+        async with httpx.AsyncClient(**client_options) as client:
+            # 遍历分页
+            page_num = 0
+            while page_num < 20:  # 最多20页防无限循环
+                page_num += 1
+                if page_num == 1:
+                    page_url = gallery_url
+                else:
+                    page_url = self._foamgirl_next_page_url(gallery_url, page_num)
+
+                html_content = await self._foamgirl_fetch(client, page_url)
+                if not html_content:
+                    break
+
+                soup = BeautifulSoup(html_content, "html.parser")
+
+                # 首页提取标题
+                if not gallery_title:
+                    gallery_title = self._extract_foamgirl_title(soup)
+                    if not gallery_title:
+                        raise RuntimeError("未能从 foamgirl 页面提取图集标题")
+
+                # 提取当前页图片
+                page_images = self._extract_foamgirl_images(soup, page_url)
+                if not page_images and page_num > 1:
+                    break  # 后续页无图即结束
+
+                for img_url in page_images:
+                    if img_url not in seen_urls:
+                        seen_urls.add(img_url)
+                        all_image_urls.append(img_url)
+
+                # 检查是否有下一页
+                if not self._foamgirl_has_next_page(soup, page_num):
+                    break
+
+                await asyncio.sleep(0.5)
+
+            if not all_image_urls:
+                raise RuntimeError("未从 foamgirl 图集页面提取到图片链接")
+
+            return GalleryParseResult(
+                title=gallery_title,
+                page_url=gallery_url,
+                image_urls=all_image_urls,
+            )
+
+    def _foamgirl_next_page_url(self, base_url: str, page_num: int) -> str:
+        """生成 foamgirl 分页 URL。
+        /1838332.html -> /1838332_2.html -> /1838332_3.html
+        """
+        parsed = urlparse(base_url)
+        path = parsed.path
+        # 替换 .html 为 _N.html
+        if path.endswith(".html"):
+            base_path = path.rsplit(".html", 1)[0]
+            # 去掉已有的 _N 后缀
+            base_path = re.sub(r"_\d+$", "", base_path)
+            return f"{parsed.scheme}://{parsed.netloc}{base_path}_{page_num}.html"
+        return base_url
+
+    def _foamgirl_has_next_page(self, soup: BeautifulSoup, current_page: int) -> bool:
+        """检查 foamgirl 页面是否有下一页。
+
+        分页导航中 .page-numbers.next 可能指向上/下一页（循环导航），
+        所以只看纯数字页码链接，如果有大于 current_page 的数字则说明还有下一页。
+        """
+        for a in soup.select("a.page-numbers"):
+            cls = a.get("class", [])
+            # 跳过 prev/next 类
+            if any(c in cls for c in ("prev", "next")):
+                continue
+            text = a.get_text(strip=True)
+            try:
+                if int(text) > current_page:
+                    return True
+            except ValueError:
+                continue
+        return False
+
+    async def _foamgirl_fetch(self, client: httpx.AsyncClient, url: str) -> str:
+        """用 httpx 抓取 foamgirl 页面 HTML，带重试"""
+        for attempt in range(4):
+            try:
+                resp = await client.get(url, follow_redirects=True)
+                if resp.status_code == 429:
+                    retry_after = 3 + attempt * 2
+                    await asyncio.sleep(retry_after)
+                    continue
+                resp.raise_for_status()
+                return resp.text
+            except Exception:
+                if attempt < 3:
+                    await asyncio.sleep(1 + attempt)
+                    continue
+                raise
+        return ""
+
+    def _extract_foamgirl_title(self, soup: BeautifulSoup) -> str:
+        """从 foamgirl 页面提取标题"""
+        # 优先 h1
+        h1 = soup.select_one("h1")
+        if h1 and h1.get_text(strip=True):
+            return self._clean_title(h1.get_text(" ", strip=True))
+
+        # 回退 <title>
+        title_el = soup.select_one("title")
+        if title_el and title_el.get_text(strip=True):
+            raw = title_el.get_text(" ", strip=True)
+            for sep in [" - ", " | ", " -- "]:
+                if sep in raw:
+                    raw = raw.split(sep)[0].strip()
+            cleaned = self._clean_title(raw)
+            if cleaned:
+                return cleaned
+
+        return ""
+
+    def _extract_foamgirl_images(self, soup: BeautifulSoup, base_url: str) -> list[str]:
+        """从 foamgirl 页面提取图片 URL。
+
+        只提取正文区域（#content / .content）中的图片，
+        图片在 cdn.foamgirl.net 的 wp-content/uploads 路径下，
+        排除 logo/svg、广告 gif、推荐文章缩略图等。
+        """
+        found: list[str] = []
+        seen: set[str] = set()
+
+        # 优先从正文区域提取
+        content_area = soup.select_one("#content") or soup.select_one(".content")
+        target = content_area if content_area else soup
+
+        for img in target.select("img"):
+            src = (img.get("data-src") or img.get("data-lazy-src") or img.get("src") or "").strip()
+            if not src or src.startswith("data:"):
+                continue
+            lower = src.lower()
+            # 必须是 wp-content/uploads 下的图片
+            if "/wp-content/uploads/" not in lower:
+                continue
+            # 排除非内容图
+            if any(token in lower for token in ("logo", "icon", "avatar", "favicon", "cx_img")):
+                continue
+            # 排除 gif 广告图
+            if lower.endswith(".gif"):
+                continue
+            # 排除 SVG
+            if lower.endswith(".svg"):
+                continue
+            absolute_url = urljoin(base_url, src)
+            if absolute_url in seen:
+                continue
+            seen.add(absolute_url)
+            clean = lower.split("?")[0]
+            if any(clean.endswith(ext) for ext in IMAGE_EXTENSIONS):
+                found.append(absolute_url)
+
+        return found
+
+    # ---- tokyobombers.com 专用解析 ----
+
+    @staticmethod
+    def _is_tokyobombers_url(url: str) -> bool:
+        return "tokyobombers.com" in urlparse(url).netloc
+
+    async def _parse_tokyobombers_gallery(self, gallery_url: str) -> GalleryParseResult:
+        """使用 httpx + BeautifulSoup 解析 tokyobombers.com 图集。
+
+        tokyobombers 是 WordPress 站点，图片在静态 HTML 的 img[src] 属性中，
+        路径为 /wp-content/uploads/，无需 Playwright/JS 执行。
+        """
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Referer": "https://www.tokyobombers.com/",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        }
+        client_options = self._client_options(headers)
+
+        async with httpx.AsyncClient(**client_options) as client:
+            html_content = await self._tokyobombers_fetch(client, gallery_url)
+            soup = BeautifulSoup(html_content, "html.parser")
+
+            # 提取标题
+            gallery_title = self._extract_tokyobombers_title(soup)
+            if not gallery_title:
+                raise RuntimeError("未能从 tokyobombers 页面提取图集标题")
+
+            # 提取图片
+            all_image_urls = self._extract_tokyobombers_images(soup, gallery_url)
+            if not all_image_urls:
+                raise RuntimeError("未从 tokyobombers 图集页面提取到图片链接")
+
+            return GalleryParseResult(
+                title=gallery_title,
+                page_url=gallery_url,
+                image_urls=all_image_urls,
+            )
+
+    async def _tokyobombers_fetch(self, client: httpx.AsyncClient, url: str) -> str:
+        """用 httpx 抓取 tokyobombers 页面 HTML，带重试"""
+        for attempt in range(4):
+            try:
+                resp = await client.get(url, follow_redirects=True)
+                if resp.status_code == 429:
+                    retry_after = 3 + attempt * 2
+                    await asyncio.sleep(retry_after)
+                    continue
+                resp.raise_for_status()
+                return resp.text
+            except Exception:
+                if attempt < 3:
+                    await asyncio.sleep(1 + attempt)
+                    continue
+                raise
+        return ""
+
+    def _extract_tokyobombers_title(self, soup: BeautifulSoup) -> str:
+        """从 tokyobombers 页面提取标题"""
+        # 优先 h1
+        h1 = soup.select_one("h1.entry-title, h1")
+        if h1 and h1.get_text(strip=True):
+            return self._clean_title(h1.get_text(" ", strip=True))
+
+        # 回退 <title>
+        title_el = soup.select_one("title")
+        if title_el and title_el.get_text(strip=True):
+            raw = title_el.get_text(" ", strip=True)
+            # 去除站点后缀，如 " - Big Boobs Asia"
+            for sep in [" - ", " | ", " -- "]:
+                if sep in raw:
+                    raw = raw.split(sep)[0].strip()
+            cleaned = self._clean_title(raw)
+            if cleaned:
+                return cleaned
+
+        return ""
+
+    def _extract_tokyobombers_images(self, soup: BeautifulSoup, base_url: str) -> list[str]:
+        """从 tokyobombers 页面提取图片 URL。
+
+        只提取正文区域（entry-content / article）中 wp-content/uploads 下的图片，
+        排除侧栏 widget、logo、小尺寸图标等非内容图片。
+        """
+        found: list[str] = []
+        seen: set[str] = set()
+
+        # 优先从正文区域提取，避免侧栏/导航栏图片混入
+        content_area = soup.select_one(".entry-content") or soup.select_one("article")
+        target = content_area if content_area else soup
+
+        for img in target.select("img"):
+            src = (img.get("data-src") or img.get("src") or "").strip()
+            if not src or src.startswith("data:"):
+                continue
+            lower = src.lower()
+            # 必须是 wp-content/uploads 下的图片
+            if "/wp-content/uploads/" not in lower:
+                continue
+            # 过滤非内容图（尺寸过小的通常是图标/logo）
+            width = img.get("width", "")
+            height = img.get("height", "")
+            try:
+                if width and int(width) < 50:
+                    continue
+                if height and int(height) < 50:
+                    continue
+            except (ValueError, TypeError):
+                pass
+            absolute_url = urljoin(base_url, src)
+            # 去掉 URL 中的尺寸后缀（如 -150x150、-300x200 等），获取原图
+            absolute_url = re.sub(r"-\d+x\d+(?=\.\w+$)", "", absolute_url)
+            if absolute_url in seen:
+                continue
+            seen.add(absolute_url)
+            clean = lower.split("?")[0]
+            if any(clean.endswith(ext) for ext in IMAGE_EXTENSIONS):
+                found.append(absolute_url)
+
+        return found
 
     # ---- buondua.com 专用解析 ----
 
@@ -735,3 +1280,10 @@ class ImageGalleryCrawler:
     def _notify(self, callback: ProgressCallback | None, progress: float, speed: str, phase: str, detail: str, extra: dict | None = None) -> None:
         if callback:
             callback(round(progress, 2), speed, phase, detail, extra or {})
+
+
+
+
+
+
+
