@@ -134,29 +134,40 @@ class ImageGalleryCrawler:
             "total_images": total, "current_index": 0, "success_count": 0, "failed_count": 0, "title": parsed.title,
         })
 
-        async with httpx.AsyncClient(
-            **self._client_options({"User-Agent": USER_AGENT, "Referer": parsed.page_url})
-        ) as client:
-            for index, image_url in enumerate(parsed.image_urls, start=1):
-                detail = f"正在下载第 {index}/{total} 张图片"
-                try:
-                    image_bytes = await self._download_image(client, image_url, parsed.page_url)
-                    ext = self._detect_extension(image_url, image_bytes)
-                    filename = f"{index:03d}{ext}"
-                    image_path = gallery_dir / filename
-                    image_path.write_bytes(image_bytes)
-                    saved_paths.append(str(image_path))
-                except Exception as exc:
-                    failed_count += 1
-                    detail = f"第 {index}/{total} 张下载失败：{str(exc)[:60]}"
+        # 判断是否有 Cloudflare 保护的 CDN 图片（需要 Playwright 下载）
+        needs_playwright = any("everiaclub.com" in url for url in parsed.image_urls)
 
-                elapsed = max(time.time() - started_at, 0.1)
-                speed = f"{len(saved_paths) / elapsed:.2f} 张/秒"
-                self._notify(progress_callback, index / total * 100, speed, "downloading", detail, {
-                    "total_images": total, "current_index": index,
-                    "success_count": len(saved_paths), "failed_count": failed_count, "title": parsed.title,
-                })
-                await asyncio.sleep(0.3)
+        if needs_playwright and async_playwright is not None:
+            # Playwright 方式：在页面上下文中逐张下载图片
+            await self._download_images_with_playwright(
+                parsed, gallery_dir, saved_paths, failed_count,
+                progress_callback, started_at, total,
+            )
+        else:
+            # httpx 方式：常规下载
+            async with httpx.AsyncClient(
+                **self._client_options({"User-Agent": USER_AGENT, "Referer": parsed.page_url})
+            ) as client:
+                for index, image_url in enumerate(parsed.image_urls, start=1):
+                    detail = f"正在下载第 {index}/{total} 张图片"
+                    try:
+                        image_bytes = await self._download_image(client, image_url, parsed.page_url)
+                        ext = self._detect_extension(image_url, image_bytes)
+                        filename = f"{index:03d}{ext}"
+                        image_path = gallery_dir / filename
+                        image_path.write_bytes(image_bytes)
+                        saved_paths.append(str(image_path))
+                    except Exception as exc:
+                        failed_count += 1
+                        detail = f"第 {index}/{total} 张下载失败：{str(exc)[:60]}"
+
+                    elapsed = max(time.time() - started_at, 0.1)
+                    speed = f"{len(saved_paths) / elapsed:.2f} 张/秒"
+                    self._notify(progress_callback, index / total * 100, speed, "downloading", detail, {
+                        "total_images": total, "current_index": index,
+                        "success_count": len(saved_paths), "failed_count": failed_count, "title": parsed.title,
+                    })
+                    await asyncio.sleep(0.3)
 
         if not saved_paths:
             raise RuntimeError("图片下载全部失败")
@@ -169,6 +180,112 @@ class ImageGalleryCrawler:
             "image_paths": saved_paths,
             "source_url": gallery_url,
         }
+
+
+    async def _download_images_with_playwright(
+        self, parsed: "GalleryParseResult", gallery_dir: Path,
+        saved_paths: list[str], failed_count: int,
+        progress_callback, started_at: float, total: int,
+    ) -> None:
+        """使用 Playwright 下载 Cloudflare 保护的 CDN 图片。
+
+        通过逐页打开页面并拦截响应来捕获图片数据，
+        利用浏览器已通过 Cloudflare challenge 的上下文下载。
+        """
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent=USER_AGENT,
+                viewport={"width": 1365, "height": 900},
+            )
+
+            # 按页面 URL 分组图片
+            url_to_index: dict[str, int] = {}
+            for i, img_url in enumerate(parsed.image_urls, 1):
+                url_to_index[img_url] = i
+
+            # 构建分页 URL -> 该页图片列表的映射
+            page_url_to_images: dict[str, list[str]] = {}
+            base_url = parsed.page_url
+            for img_url in parsed.image_urls:
+                # 确定该图片属于哪一页（解析时已按顺序排列）
+                # 简单策略：一次性在第一页加载全部图片
+                if base_url not in page_url_to_images:
+                    page_url_to_images[base_url] = []
+                page_url_to_images[base_url].append(img_url)
+
+            # 对于多页图集，需要遍历分页
+            # 根据 URL 特征判断分页格式
+            page_num = 1
+            max_pages = 20
+            all_remaining = set(parsed.image_urls)
+            downloaded: dict[str, bytes] = {}
+
+            while page_num <= max_pages and all_remaining:
+                if page_num == 1:
+                    page_url = base_url
+                elif "hotgirl.asia" in base_url:
+                    page_url = f"{base_url}?num={page_num}"
+                elif "foamgirl.net" in base_url:
+                    parsed_base = urlparse(base_url)
+                    path = parsed_base.path.rsplit(".html", 1)[0]
+                    path = re.sub(r"_\d+$", "", path)
+                    page_url = f"{parsed_base.scheme}://{parsed_base.netloc}{path}_{page_num}.html"
+                else:
+                    break
+
+                page = await context.new_page()
+                captured: dict[str, bytes] = {}
+
+                async def on_response(response):
+                    url = response.url
+                    if url in all_remaining and response.status == 200:
+                        try:
+                            body = await response.body()
+                            if len(body) > 256:
+                                captured[url] = body
+                        except Exception:
+                            pass
+
+                page.on("response", on_response)
+
+                try:
+                    await page.goto(page_url, wait_until="networkidle", timeout=60000)
+                    await page.wait_for_timeout(3000)
+
+                    # 滚动到底部触发懒加载
+                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    await page.wait_for_timeout(2000)
+                except Exception:
+                    pass
+                finally:
+                    await page.close()
+
+                # 保存捕获的图片
+                for img_url, body in captured.items():
+                    idx = url_to_index.get(img_url, 0)
+                    ext = self._detect_extension(img_url, body)
+                    filename = f"{idx:03d}{ext}"
+                    image_path = gallery_dir / filename
+                    image_path.write_bytes(body)
+                    saved_paths.append(str(image_path))
+                    all_remaining.discard(img_url)
+
+                    elapsed = max(time.time() - started_at, 0.1)
+                    speed = f"{len(saved_paths) / elapsed:.2f} 张/秒"
+                    self._notify(progress_callback, idx / total * 100, speed, "downloading",
+                                 f"正在下载第 {idx}/{total} 张图片", {
+                                     "total_images": total, "current_index": idx,
+                                     "success_count": len(saved_paths), "failed_count": failed_count,
+                                     "title": parsed.title,
+                                 })
+
+                if not captured and page_num > 1:
+                    break
+
+                page_num += 1
+
+            await browser.close()
 
     async def _load_page_html(self, original_url: str, page_url: str) -> str:
         html = ""
@@ -624,30 +741,33 @@ class ImageGalleryCrawler:
         return "hotgirl.asia" in urlparse(url).netloc
 
     async def _parse_hotgirl_gallery(self, gallery_url: str) -> GalleryParseResult:
-        """使用 httpx + BeautifulSoup 解析 hotgirl.asia 图集。
+        """使用 Playwright 解析 hotgirl.asia 图集。
 
-        hotgirl.asia 是 WordPress 站点，内容图片 CDN 在 files.everiaclub.com，
-        图片在 div.galeria_img 容器中，分页通过 ?num=N 参数实现。
+        hotgirl.asia 内容图片 CDN (files.everiaclub.com) 有 Cloudflare 保护，
+        必须通过 Playwright 加载页面才能通过 challenge 并捕获图片。
+        分页通过 ?num=N 参数实现。
         """
+        if async_playwright is None:
+            raise RuntimeError("hotgirl.asia 需要 Playwright 支持，请安装 playwright 并执行 playwright install chromium")
+
         all_image_urls: list[str] = []
         seen_urls: set[str] = set()
         gallery_title = ""
 
-        headers = {
-            "User-Agent": USER_AGENT,
-            "Referer": "https://hotgirl.asia/",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        }
-        client_options = self._client_options(headers)
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent=USER_AGENT,
+                viewport={"width": 1365, "height": 900},
+            )
 
-        async with httpx.AsyncClient(**client_options) as client:
             page_num = 0
             while page_num < 20:
                 page_num += 1
                 page_url = gallery_url if page_num == 1 else f"{gallery_url}?num={page_num}"
 
-                html_content = await self._hotgirl_fetch(client, page_url)
+                # 用 Playwright 加载页面，自动通过 Cloudflare challenge
+                html_content = await self._hotgirl_fetch_with_playwright(context, page_url)
                 if not html_content:
                     break
 
@@ -673,16 +793,28 @@ class ImageGalleryCrawler:
                 if not self._hotgirl_has_next_page(soup, page_num):
                     break
 
-                await asyncio.sleep(0.5)
+            await browser.close()
 
-            if not all_image_urls:
-                raise RuntimeError("未从 hotgirl 图集页面提取到图片链接")
+        if not all_image_urls:
+            raise RuntimeError("未从 hotgirl 图集页面提取到图片链接")
 
-            return GalleryParseResult(
-                title=gallery_title,
-                page_url=gallery_url,
-                image_urls=all_image_urls,
-            )
+        return GalleryParseResult(
+            title=gallery_title,
+            page_url=gallery_url,
+            image_urls=all_image_urls,
+        )
+
+    async def _hotgirl_fetch_with_playwright(self, context, url: str) -> str:
+        """用 Playwright 加载 hotgirl 页面，通过 Cloudflare challenge"""
+        page = await context.new_page()
+        try:
+            await page.goto(url, wait_until="networkidle", timeout=60000)
+            await page.wait_for_timeout(2000)
+            return await page.content()
+        except Exception:
+            return ""
+        finally:
+            await page.close()
 
     async def _hotgirl_fetch(self, client: httpx.AsyncClient, url: str) -> str:
         """用 httpx 抓取 hotgirl 页面 HTML，带重试"""
@@ -1443,6 +1575,9 @@ class ImageGalleryCrawler:
     def _notify(self, callback: ProgressCallback | None, progress: float, speed: str, phase: str, detail: str, extra: dict | None = None) -> None:
         if callback:
             callback(round(progress, 2), speed, phase, detail, extra or {})
+
+
+
 
 
 
