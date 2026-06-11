@@ -90,6 +90,8 @@ class ImageGalleryCrawler:
             return await self._parse_tokyobombers_gallery(page_url)
         if self._is_foamgirl_url(page_url):
             return await self._parse_foamgirl_gallery(page_url)
+        if self._is_hotgirl_url(page_url):
+            return await self._parse_hotgirl_gallery(page_url)
 
         html = await self._load_page_html(gallery_url, page_url)
         soup = BeautifulSoup(html, "html.parser")
@@ -613,6 +615,167 @@ class ImageGalleryCrawler:
         return max(total, 1)
 
 
+
+
+    # ---- hotgirl.asia 专用解析 ----
+
+    @staticmethod
+    def _is_hotgirl_url(url: str) -> bool:
+        return "hotgirl.asia" in urlparse(url).netloc
+
+    async def _parse_hotgirl_gallery(self, gallery_url: str) -> GalleryParseResult:
+        """使用 httpx + BeautifulSoup 解析 hotgirl.asia 图集。
+
+        hotgirl.asia 是 WordPress 站点，内容图片 CDN 在 files.everiaclub.com，
+        图片在 div.galeria_img 容器中，分页通过 ?num=N 参数实现。
+        """
+        all_image_urls: list[str] = []
+        seen_urls: set[str] = set()
+        gallery_title = ""
+
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Referer": "https://hotgirl.asia/",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        }
+        client_options = self._client_options(headers)
+
+        async with httpx.AsyncClient(**client_options) as client:
+            page_num = 0
+            while page_num < 20:
+                page_num += 1
+                page_url = gallery_url if page_num == 1 else f"{gallery_url}?num={page_num}"
+
+                html_content = await self._hotgirl_fetch(client, page_url)
+                if not html_content:
+                    break
+
+                soup = BeautifulSoup(html_content, "html.parser")
+
+                # 首页提取标题
+                if not gallery_title:
+                    gallery_title = self._extract_hotgirl_title(soup)
+                    if not gallery_title:
+                        raise RuntimeError("未能从 hotgirl 页面提取图集标题")
+
+                # 提取当前页图片
+                page_images = self._extract_hotgirl_images(soup, page_url)
+                if not page_images and page_num > 1:
+                    break
+
+                for img_url in page_images:
+                    if img_url not in seen_urls:
+                        seen_urls.add(img_url)
+                        all_image_urls.append(img_url)
+
+                # 检查是否有下一页
+                if not self._hotgirl_has_next_page(soup, page_num):
+                    break
+
+                await asyncio.sleep(0.5)
+
+            if not all_image_urls:
+                raise RuntimeError("未从 hotgirl 图集页面提取到图片链接")
+
+            return GalleryParseResult(
+                title=gallery_title,
+                page_url=gallery_url,
+                image_urls=all_image_urls,
+            )
+
+    async def _hotgirl_fetch(self, client: httpx.AsyncClient, url: str) -> str:
+        """用 httpx 抓取 hotgirl 页面 HTML，带重试"""
+        for attempt in range(4):
+            try:
+                resp = await client.get(url, follow_redirects=True)
+                if resp.status_code == 429:
+                    retry_after = 3 + attempt * 2
+                    await asyncio.sleep(retry_after)
+                    continue
+                resp.raise_for_status()
+                return resp.text
+            except Exception:
+                if attempt < 3:
+                    await asyncio.sleep(1 + attempt)
+                    continue
+                raise
+        return ""
+
+    def _extract_hotgirl_title(self, soup: BeautifulSoup) -> str:
+        """从 hotgirl 页面提取标题，优先从 LD+JSON headline 提取"""
+        # 优先 LD+JSON
+        for script in soup.select('script[type="application/ld+json"]'):
+            if not script.string:
+                continue
+            try:
+                data = json.loads(script.string)
+            except Exception:
+                continue
+            # 处理 @graph 结构
+            items = data.get("@graph", [data]) if isinstance(data.get("@graph"), list) else [data]
+            for item in items:
+                headline = item.get("headline") or item.get("name")
+                if headline:
+                    cleaned = self._clean_title(str(headline))
+                    if cleaned:
+                        return cleaned
+
+        # 回退 h1
+        h1 = soup.select_one("h1")
+        if h1 and h1.get_text(strip=True):
+            return self._clean_title(h1.get_text(" ", strip=True))
+
+        # 回退 <title>
+        title_el = soup.select_one("title")
+        if title_el and title_el.get_text(strip=True):
+            raw = title_el.get_text(" ", strip=True)
+            for sep in [" - ", " | ", " -- "]:
+                if sep in raw:
+                    raw = raw.split(sep)[0].strip()
+            cleaned = self._clean_title(raw)
+            if cleaned:
+                return cleaned
+
+        return ""
+
+    def _extract_hotgirl_images(self, soup: BeautifulSoup, base_url: str) -> list[str]:
+        """从 hotgirl 页面提取图片 URL。
+
+        内容图片 CDN 为 files.everiaclub.com，分布在 div.page-detail 容器中。
+        通过 CDN 域名匹配精准提取内容图，排除侧栏缩略图、logo、rating 等。
+        """
+        found: list[str] = []
+        seen: set[str] = set()
+
+        for img in soup.select("img"):
+            src = (img.get("data-src") or img.get("data-lazy-src") or img.get("src") or "").strip()
+            if not src or src.startswith("data:"):
+                continue
+            lower = src.lower()
+            # 只提取 everiaclub CDN 上的内容图片
+            if "everiaclub.com" not in lower:
+                continue
+            absolute_url = urljoin(base_url, src)
+            if absolute_url in seen:
+                continue
+            seen.add(absolute_url)
+            clean = lower.split("?")[0]
+            if any(clean.endswith(ext) for ext in IMAGE_EXTENSIONS):
+                found.append(absolute_url)
+
+        return found
+
+    def _hotgirl_has_next_page(self, soup: BeautifulSoup, current_page: int) -> bool:
+        """检查 hotgirl 页面是否有下一页"""
+        for a in soup.select("a.page"):
+            text = a.get_text(strip=True)
+            try:
+                if int(text) > current_page:
+                    return True
+            except ValueError:
+                continue
+        return False
 
     # ---- foamgirl.net 专用解析 ----
 
@@ -1280,6 +1443,9 @@ class ImageGalleryCrawler:
     def _notify(self, callback: ProgressCallback | None, progress: float, speed: str, phase: str, detail: str, extra: dict | None = None) -> None:
         if callback:
             callback(round(progress, 2), speed, phase, detail, extra or {})
+
+
+
 
 
 
