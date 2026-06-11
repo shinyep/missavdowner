@@ -15,7 +15,7 @@
 
 ### 图集下载
 
-- 🖼️ 支持 4khd / szzs.uuss.uk / kkc3.com / buondua.com 等图集站点
+- 🖼️ 支持 4khd / szzs / kkc3 / buondua / photos18 / tokyobombers / foamgirl 等图集站点
 - 🔍 两步操作：解析图集预览 → 选择模式 → 下载
 - 📄 自动提取分页，全部图片一键下载
 - 📈 任务卡片显示详细进度：总张数 / 当前第几张 / 成功 / 失败
@@ -37,10 +37,10 @@
 
 ### Python 依赖安装
 
-`
+```
 pip install playwright httpx beautifulsoup4 flask flask-cors Pillow
 playwright install chromium
-`
+```
 
 ## 安装使用
 
@@ -50,14 +50,14 @@ playwright install chromium
 
 ### 从源码运行
 
-`
+```
 git clone https://github.com/shinyep/missavdowner.git
 cd videodown
 npm install
 pip install -r python/requirements.txt
 playwright install chromium
 npm run dev
-`
+```
 
 ## 使用方法
 
@@ -70,14 +70,14 @@ npm run dev
 
 ### 图集下载
 
-1. 粘贴 4khd / szzs / kkc3 / buondua 图集链接
+1. 粘贴 4khd / szzs / kkc3 / buondua / photos18 / tokyobombers / foamgirl 图集链接
 2. 点击「解析图集」查看标题和图片数量
 3. 选择「下载到本地」或「入库到 Novel」
 4. 点击「开始下载」
 
 ## 项目结构
 
-`
+```
 videodown/
 ├── electron/              # Electron 主进程
 │   ├── main.ts           # 主进程入口 + IPC 处理
@@ -92,20 +92,20 @@ videodown/
 │   ├── server.py         # Flask API 服务器
 │   ├── crawler.py        # missav 爬虫
 │   ├── kissjav_crawler.py    # kissjav 爬虫
-│   ├── image_crawler.py      # 图集爬虫（4khd/szzs）
+│   ├── image_crawler.py      # 图集爬虫（4khd/szzs/kkc3/buondua/photos18/tokyobombers/foamgirl）
 │   └── novel_import.py       # Novel 项目入库
 ├── resources/            # 资源文件
 │   └── ffmpeg.exe        # FFmpeg 可执行文件
 └── package.json
-`
+```
 
 ## 开发
 
-`
+```
 npm run dev          # 开发模式
 npm run build        # 构建打包
 npx vue-tsc --noEmit # 类型检查
-`
+```
 
 ## 注意事项
 
@@ -114,3 +114,4 @@ npx vue-tsc --noEmit # 类型检查
 ## 许可证
 
 MIT License
+
