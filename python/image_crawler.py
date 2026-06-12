@@ -95,6 +95,8 @@ class ImageGalleryCrawler:
             return await self._parse_hotgirl_gallery(page_url)
         if self._is_phimvuspot_url(page_url):
             return await self._parse_phimvuspot_gallery(page_url)
+        if self._is_goddess247_url(page_url):
+            return await self._parse_goddess247_gallery(page_url)
 
         html = await self._load_page_html(gallery_url, page_url)
         soup = BeautifulSoup(html, "html.parser")
@@ -366,6 +368,21 @@ class ImageGalleryCrawler:
         if ("szzs.uuss.uk" in parsed.netloc or "4khd" in parsed.netloc) and "/gallery/" in gallery_url:
             return gallery_url.rstrip("/").replace("/gallery/", "/content/") + ".html"
         return gallery_url
+
+    @staticmethod
+    def _is_goddess247_url(url: str) -> bool:
+        """检测是否为 goddess247.com 图集链接"""
+        return "goddess247.com" in urlparse(url).netloc.lower()
+
+    async def _parse_goddess247_gallery(self, gallery_url: str) -> GalleryParseResult:
+        """使用 httpx + BeautifulSoup 解析 goddess247 图集正文图片。"""
+        html_content = await self._load_page_html(gallery_url, gallery_url)
+        soup = BeautifulSoup(html_content, "html.parser")
+        gallery_title = self._extract_goddess247_title(soup) or self._extract_gallery_title(soup, gallery_url)
+        image_urls = self._extract_goddess247_images(soup, gallery_url)
+        if not image_urls:
+            raise RuntimeError("未从图集页面提取到图片链接")
+        return GalleryParseResult(title=gallery_title, page_url=gallery_url, image_urls=image_urls)
 
     # ---- kkc3.com 专用解析 ----
 
@@ -1676,6 +1693,47 @@ class ImageGalleryCrawler:
                         total = page_num
 
         return total
+
+    def _extract_goddess247_title(self, soup: BeautifulSoup) -> str:
+        """提取 goddess247 文章标题。"""
+        for selector in ["h1.entry-title", ".elementor-heading-title", "article h1", "h1"]:
+            element = soup.select_one(selector)
+            if not element:
+                continue
+            title = self._clean_title(element.get_text(" ", strip=True))
+            if title:
+                return title
+        return ""
+
+    def _extract_goddess247_images(self, soup: BeautifulSoup, base_url: str) -> list[str]:
+        """只从 goddess247 正文容器提取原始图片，避免抓入相关推荐缩略图。"""
+        found: list[str] = []
+        seen: set[str] = set()
+        containers = [
+            soup.select_one(".elementor-widget-theme-post-content"),
+            soup.select_one(".entry-content"),
+            soup.select_one("article"),
+        ]
+
+        for container in containers:
+            if container is None:
+                continue
+            for element in container.select("img[src]"):
+                src = element.get("src")
+                if not src:
+                    continue
+                absolute_url = urljoin(base_url, src)
+                clean_url = absolute_url.split("?")[0]
+                lower_url = clean_url.lower()
+                if "/wp-content/uploads/" not in lower_url:
+                    continue
+                if any(token in lower_url for token in ("cropped-", "/cropped-", "logo", "icon", "avatar", "banner", "pixel")):
+                    continue
+                self._append_image_url(found, seen, base_url, clean_url)
+            if found:
+                return found
+
+        return found
 
     # ---- 通用 HTML 解析 ----
 
