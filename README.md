@@ -1,4 +1,4 @@
-﻿# MissAV Downloader
+# MissAV Downloader
 
 多功能媒体下载器 — Windows 桌面应用，支持视频和图集下载
 

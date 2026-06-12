@@ -97,6 +97,8 @@ class ImageGalleryCrawler:
             return await self._parse_phimvuspot_gallery(page_url)
         if self._is_goddess247_url(page_url):
             return await self._parse_goddess247_gallery(page_url)
+        if self._is_xx_knit_bid_url(page_url):
+            return await self._parse_xx_knit_bid_gallery(page_url)
 
         html = await self._load_page_html(gallery_url, page_url)
         soup = BeautifulSoup(html, "html.parser")
@@ -1879,27 +1881,117 @@ class ImageGalleryCrawler:
         if callback:
             callback(round(progress, 2), speed, phase, detail, extra or {})
 
+    @staticmethod
+    def _is_xx_knit_bid_url(url: str) -> bool:
+        """????? xx.knit.bid ????"""
+        return "xx.knit.bid" in urlparse(url).netloc.lower()
 
+    async def _parse_xx_knit_bid_gallery(self, gallery_url: str) -> GalleryParseResult:
+        """?? JSON-LD ???? xx.knit.bid ??????????????"""
+        html_content = await self._load_page_html(gallery_url, gallery_url)
+        soup = BeautifulSoup(html_content, "html.parser")
+        json_ld = self._extract_xx_knit_bid_jsonld(soup)
+        title = self._extract_xx_knit_bid_title(soup, json_ld)
+        image_urls = list(self._extract_xx_knit_bid_images_from_jsonld(json_ld, gallery_url))
+        total_pages = self._detect_xx_knit_bid_total_pages(json_ld)
 
+        if total_pages > 1:
+            base_url = gallery_url.rstrip("/")
+            for page_num in range(2, total_pages + 1):
+                page_url = f"{base_url}/page/{page_num}/"
+                page_html = await self._load_page_html(page_url, page_url)
+                page_soup = BeautifulSoup(page_html, "html.parser")
+                page_json_ld = self._extract_xx_knit_bid_jsonld(page_soup)
+                page_images = self._extract_xx_knit_bid_images_from_jsonld(page_json_ld, page_url)
+                if not page_images:
+                    page_images = self._extract_xx_knit_bid_images_from_soup(page_soup, page_url)
+                for img_url in page_images:
+                    if img_url not in image_urls:
+                        image_urls.append(img_url)
 
+        if not image_urls:
+            raise RuntimeError("?????????????")
 
+        return GalleryParseResult(title=title, page_url=gallery_url, image_urls=image_urls)
 
+    def _extract_xx_knit_bid_jsonld(self, soup: BeautifulSoup) -> dict:
+        """?? xx.knit.bid ???? ImageGallery JSON-LD?"""
+        for script in soup.select('script[type="application/ld+json"]'):
+            raw = script.string or script.get_text()
+            if not raw or "ImageGallery" not in raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except Exception:
+                continue
+            if isinstance(data, dict) and data.get("@type") == "ImageGallery":
+                return data
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict) and item.get("@type") == "ImageGallery":
+                        return item
+        return {}
 
+    def _extract_xx_knit_bid_title(self, soup: BeautifulSoup, json_ld: dict) -> str:
+        """?? xx.knit.bid ????????? JSON-LD name?"""
+        title = self._clean_title(json_ld.get("name")) if json_ld else None
+        if title:
+            return title
 
+        for selector in ['meta[property="og:title"]', 'meta[name="twitter:title"]', 'title']:
+            element = soup.select_one(selector)
+            content = element.get("content", "").strip() if element else ""
+            if not content and element:
+                content = element.get_text(" ", strip=True)
+            title = self._clean_title(content)
+            if title:
+                return title
+        return self._extract_gallery_title(soup, soup.title.get_text() if soup.title else "")
 
+    def _extract_xx_knit_bid_images_from_jsonld(self, json_ld: dict, base_url: str) -> list[str]:
+        """? xx.knit.bid ? ImageGallery JSON-LD ????? URL?"""
+        if not json_ld:
+            return []
+        items = json_ld.get("itemListElement") or []
+        result: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            url = item.get("contentUrl")
+            if not url:
+                continue
+            absolute_url = urljoin(base_url, url)
+            if absolute_url in seen:
+                continue
+            seen.add(absolute_url)
+            result.append(absolute_url)
+        return result
 
+    def _detect_xx_knit_bid_total_pages(self, json_ld: dict) -> int:
+        """?? xx.knit.bid ???????"""
+        if not json_ld:
+            return 1
+        pagination = json_ld.get("pagination") or {}
+        total_pages = pagination.get("totalPages")
+        if isinstance(total_pages, int) and total_pages > 1:
+            return total_pages
+        return 1
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    def _extract_xx_knit_bid_images_from_soup(self, soup: BeautifulSoup, base_url: str) -> list[str]:
+        """xx.knit.bid ????????????? JSON-LD ????"""
+        found: list[str] = []
+        seen: set[str] = set()
+        for container in [soup.select_one(".article-content"), soup.select_one("article"), soup]:
+            if container is None:
+                continue
+            for element in container.select("img[data-src], img[src]"):
+                src = element.get("data-src") or element.get("src")
+                if not src or src.startswith("data:"):
+                    continue
+                absolute_url = urljoin(base_url, src)
+                if absolute_url in seen:
+                    continue
+                seen.add(absolute_url)
+                found.append(absolute_url)
+            if found:
+                return found
+        return found
