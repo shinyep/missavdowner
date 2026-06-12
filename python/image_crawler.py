@@ -1696,13 +1696,29 @@ class ImageGalleryCrawler:
 
     def _extract_goddess247_title(self, soup: BeautifulSoup) -> str:
         """提取 goddess247 文章标题。"""
-        for selector in ["h1.entry-title", ".elementor-heading-title", "article h1", "h1"]:
+        meta_selectors = [
+            'meta[property="og:title"]',
+            'meta[name="twitter:title"]',
+        ]
+        for selector in meta_selectors:
             element = soup.select_one(selector)
-            if not element:
-                continue
-            title = self._clean_title(element.get_text(" ", strip=True))
+            content = element.get("content", "").strip() if element else ""
+            title = self._clean_title(content)
             if title:
                 return title
+
+        title_element = soup.select_one("title")
+        if title_element:
+            title = self._clean_title(title_element.get_text(" ", strip=True))
+            if title:
+                return title
+
+        for selector in ["article h1.entry-title", "article h1", "h1.entry-title", "h1"]:
+            element = soup.select_one(selector)
+            if element:
+                title = self._clean_title(element.get_text(" ", strip=True))
+                if title:
+                    return title
         return ""
 
     def _extract_goddess247_images(self, soup: BeautifulSoup, base_url: str) -> list[str]:
