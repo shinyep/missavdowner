@@ -15,7 +15,7 @@
 
 ### 图集下载
 
-- 🖼️ 支持 4khd / szzs / kkc3 / buondua / photos18 / tokyobombers / foamgirl / hotgirl 等图集站点
+- 🖼️ 支持 4khd / szzs / kkc3 / buondua / photos18 / tokyobombers / foamgirl / hotgirl / phimvuspot 等图集站点
 - 🔍 两步操作：解析图集预览 → 选择模式 → 下载
 - 📄 自动提取分页，全部图片一键下载
 - 📈 任务卡片显示详细进度：总张数 / 当前第几张 / 成功 / 失败
@@ -70,7 +70,7 @@ npm run dev
 
 ### 图集下载
 
-1. 粘贴 4khd / szzs / kkc3 / buondua / photos18 / tokyobombers / foamgirl / hotgirl 图集链接
+1. 粘贴 4khd / szzs / kkc3 / buondua / photos18 / tokyobombers / foamgirl / hotgirl / phimvuspot 图集链接
 2. 点击「解析图集」查看标题和图片数量
 3. 选择「下载到本地」或「入库到 Novel」
 4. 点击「开始下载」
@@ -92,7 +92,7 @@ videodown/
 │   ├── server.py         # Flask API 服务器
 │   ├── crawler.py        # missav 爬虫
 │   ├── kissjav_crawler.py    # kissjav 爬虫
-│   ├── image_crawler.py      # 图集爬虫（4khd/szzs/kkc3/buondua/photos18/tokyobombers/foamgirl/hotgirl）
+│   ├── image_crawler.py      # 图集爬虫（4khd/szzs/kkc3/buondua/photos18/tokyobombers/foamgirl/hotgirl/phimvuspot）
 │   └── novel_import.py       # Novel 项目入库
 ├── resources/            # 资源文件
 │   └── ffmpeg.exe        # FFmpeg 可执行文件
@@ -114,5 +114,6 @@ npx vue-tsc --noEmit # 类型检查
 ## 许可证
 
 MIT License
+
 
 

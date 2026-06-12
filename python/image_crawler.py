@@ -92,6 +92,8 @@ class ImageGalleryCrawler:
             return await self._parse_foamgirl_gallery(page_url)
         if self._is_hotgirl_url(page_url):
             return await self._parse_hotgirl_gallery(page_url)
+        if self._is_phimvuspot_url(page_url):
+            return await self._parse_phimvuspot_gallery(page_url)
 
         html = await self._load_page_html(gallery_url, page_url)
         soup = BeautifulSoup(html, "html.parser")
@@ -135,7 +137,7 @@ class ImageGalleryCrawler:
         })
 
         # 判断是否有 Cloudflare 保护的 CDN 图片（需要 Playwright 下载）
-        needs_playwright = any("everiaclub.com" in url for url in parsed.image_urls)
+        needs_playwright = any("everiaclub.com" in url or "thismore.fun" in url or "wp.com/im.thismore" in url for url in parsed.image_urls)
 
         if needs_playwright and async_playwright is not None:
             # Playwright 方式：在页面上下文中逐张下载图片
@@ -217,9 +219,12 @@ class ImageGalleryCrawler:
             # 对于多页图集，需要遍历分页
             # 根据 URL 特征判断分页格式
             page_num = 1
-            max_pages = 20
+            max_pages = 30
             all_remaining = set(parsed.image_urls)
-            downloaded: dict[str, bytes] = {}
+            # 构建 base_url -> full_url 映射，用于去掉查询参数后匹配
+            all_remaining_bases: dict[str, str] = {}
+            for u in parsed.image_urls:
+                all_remaining_bases[u.split("?")[0]] = u
 
             while page_num <= max_pages and all_remaining:
                 if page_num == 1:
@@ -231,6 +236,8 @@ class ImageGalleryCrawler:
                     path = parsed_base.path.rsplit(".html", 1)[0]
                     path = re.sub(r"_\d+$", "", path)
                     page_url = f"{parsed_base.scheme}://{parsed_base.netloc}{path}_{page_num}.html"
+                elif "phimvuspot.com" in base_url:
+                    page_url = f"{base_url}?page={page_num}"
                 else:
                     break
 
@@ -238,12 +245,20 @@ class ImageGalleryCrawler:
                 captured: dict[str, bytes] = {}
 
                 async def on_response(response):
-                    url = response.url
-                    if url in all_remaining and response.status == 200:
+                    resp_url = response.url
+                    # 匹配时去掉查询参数，因为 wp.com CDN 可能加 ?w=640 等
+                    resp_base = resp_url.split("?")[0]
+                    # 查找匹配的原始 URL
+                    matched_url = None
+                    if resp_url in all_remaining:
+                        matched_url = resp_url
+                    elif resp_base in all_remaining_bases:
+                        matched_url = all_remaining_bases[resp_base]
+                    if matched_url and response.status == 200:
                         try:
                             body = await response.body()
                             if len(body) > 256:
-                                captured[url] = body
+                                captured[matched_url] = body
                         except Exception:
                             pass
 
@@ -733,6 +748,174 @@ class ImageGalleryCrawler:
 
 
 
+
+
+    # ---- phimvuspot.com 专用解析 ----
+
+    @staticmethod
+    def _is_phimvuspot_url(url: str) -> bool:
+        return "phimvuspot.com" in urlparse(url).netloc
+
+    async def _parse_phimvuspot_gallery(self, gallery_url: str) -> GalleryParseResult:
+        """使用 Playwright 解析 phimvuspot.com 图集。
+
+        phimvuspot 是 WordPress 站点，图片通过 wp.com CDN 代理（thismore.fun 源站），
+        httpx 直接请求被 429 限速，需用 Playwright 加载页面拦截图片响应。
+        内容图在 div.contentme 容器中，分页参数 ?page=N。
+        """
+        if async_playwright is None:
+            raise RuntimeError("phimvuspot.com 需要 Playwright 支持，请安装 playwright 并执行 playwright install chromium")
+
+        all_image_urls: list[str] = []
+        seen_urls: set[str] = set()
+        gallery_title = ""
+
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent=USER_AGENT,
+                viewport={"width": 1365, "height": 900},
+            )
+
+            page_num = 0
+            total_pages = 1
+            while page_num < total_pages and page_num < 30:
+                page_num += 1
+                page_url = gallery_url if page_num == 1 else f"{gallery_url}?page={page_num}"
+
+                page = await context.new_page()
+                captured: dict[str, int] = {}
+
+                async def on_response(response):
+                    url = response.url
+                    if "thismore.fun" in url and response.status == 200:
+                        try:
+                            body = await response.body()
+                            if len(body) > 5000:
+                                captured[url] = len(body)
+                        except Exception:
+                            pass
+
+                page.on("response", on_response)
+
+                try:
+                    await page.goto(page_url, wait_until="networkidle", timeout=60000)
+                    await page.wait_for_timeout(2000)
+                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    await page.wait_for_timeout(2000)
+                except Exception:
+                    pass
+
+                # 从 HTML 提取标题和分页信息
+                html = await page.content()
+                soup = BeautifulSoup(html, "html.parser")
+
+                if not gallery_title:
+                    gallery_title = self._extract_phimvuspot_title(soup)
+                    if not gallery_title:
+                        raise RuntimeError("未能从 phimvuspot 页面提取图集标题")
+                    total_pages = self._detect_phimvuspot_total_pages(soup)
+
+                await page.close()
+
+                # 从内容区域提取图片 URL（通过 src 属性而非拦截的响应）
+                page_images = self._extract_phimvuspot_images(soup, page_url)
+                if not page_images and page_num > 1:
+                    break
+
+                for img_url in page_images:
+                    if img_url not in seen_urls:
+                        seen_urls.add(img_url)
+                        all_image_urls.append(img_url)
+
+            await browser.close()
+
+        if not all_image_urls:
+            raise RuntimeError("未从 phimvuspot 图集页面提取到图片链接")
+
+        return GalleryParseResult(
+            title=gallery_title,
+            page_url=gallery_url,
+            image_urls=all_image_urls,
+        )
+
+    def _extract_phimvuspot_title(self, soup: BeautifulSoup) -> str:
+        """从 phimvuspot 页面提取标题"""
+        # 优先 LD+JSON headline
+        for script in soup.select('script[type="application/ld+json"]'):
+            if not script.string:
+                continue
+            try:
+                data = json.loads(script.string)
+            except Exception:
+                continue
+            headline = data.get("headline")
+            if headline:
+                cleaned = self._clean_title(str(headline))
+                if cleaned:
+                    return cleaned
+
+        # 回退 h2.box-mt-output
+        h2 = soup.select_one("h2.box-mt-output")
+        if h2 and h2.get_text(strip=True):
+            return self._clean_title(h2.get_text(" ", strip=True))
+
+        title_el = soup.select_one("title")
+        if title_el and title_el.get_text(strip=True):
+            raw = title_el.get_text(" ", strip=True)
+            for sep in [" - ", " | ", " -- "]:
+                if sep in raw:
+                    raw = raw.split(sep)[0].strip()
+            cleaned = self._clean_title(raw)
+            if cleaned:
+                return cleaned
+
+        return ""
+
+    def _detect_phimvuspot_total_pages(self, soup: BeautifulSoup) -> int:
+        """从标题中检测总页数，如 'Page 1/6'"""
+        title = soup.title.get_text(strip=True) if soup.title else ""
+        match = re.search(r"Page\s+\d+/(\d+)", title, re.IGNORECASE)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                pass
+        return 1
+
+    def _extract_phimvuspot_images(self, soup: BeautifulSoup, base_url: str) -> list[str]:
+        """从 phimvuspot 内容区域提取图片 URL。
+
+        内容图在 div.contentme 中，CDN 为 i0/i1/i2.wp.com 代理 thismore.fun。
+        需要去掉 ?w= 参数获取原图 URL。
+        排除侧栏推荐小图（<50KB）和导航图标。
+        """
+        found: list[str] = []
+        seen: set[str] = set()
+
+        content_area = soup.select_one("div.contentme")
+        target = content_area if content_area else soup
+
+        for img in target.select("img"):
+            src = (img.get("data-src") or img.get("data-lazy-src") or img.get("src") or "").strip()
+            if not src or src.startswith("data:"):
+                continue
+            lower = src.lower()
+            # 必须是 thismore.fun 或 wp.com 代理的图片
+            if "thismore.fun" not in lower and "wp.com" not in lower:
+                continue
+            # 排除导航/菜单图标
+            if any(token in lower for token in ("favicon", "logo", "star1", "tpd-favicon")):
+                continue
+            # 去掉 wp.com CDN 的尺寸参数获取原图
+            absolute_url = urljoin(base_url, src.split("?")[0])
+            if absolute_url in seen:
+                continue
+            seen.add(absolute_url)
+            if any(absolute_url.lower().endswith(ext) for ext in IMAGE_EXTENSIONS):
+                found.append(absolute_url)
+
+        return found
 
     # ---- hotgirl.asia 专用解析 ----
 
@@ -1575,6 +1758,12 @@ class ImageGalleryCrawler:
     def _notify(self, callback: ProgressCallback | None, progress: float, speed: str, phase: str, detail: str, extra: dict | None = None) -> None:
         if callback:
             callback(round(progress, 2), speed, phase, detail, extra or {})
+
+
+
+
+
+
 
 
 

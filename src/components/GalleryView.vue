@@ -5,7 +5,7 @@
         <div class="max-w-xl mx-auto w-full flex flex-col gap-6">
           <div class="flex flex-col gap-1">
             <h1 class="font-headline text-2xl font-bold leading-tight text-on-surface">图集图片下载</h1>
-            <p class="text-on-surface-variant text-sm">粘贴图片站点图集链接，支持 4khd / szzs / kkc3 / buondua / photos18 / tokyobombers / foamgirl / hotgirl</p>
+            <p class="text-on-surface-variant text-sm">粘贴图片站点图集链接，支持 4khd / szzs / kkc3 / buondua / photos18 / tokyobombers / foamgirl / hotgirl / phimvuspot</p>
           </div>
 
           <div class="flex flex-col gap-3">
@@ -15,7 +15,7 @@
                 v-model="galleryUrl"
                 aria-label="粘贴图集链接"
                 class="w-full h-24 bg-surface-container-highest rounded-md p-3 text-on-surface placeholder:text-outline-variant resize-none font-body text-sm border-2 border-transparent focus:border-primary focus:outline-none transition-all"
-                placeholder="在此粘贴图集链接，支持 4khd / szzs / kkc3.com / photos18.com / tokyobombers.com / foamgirl.net / hotgirl.asia 等站点"
+                placeholder="在此粘贴图集链接，支持 4khd / szzs / kkc3.com / photos18.com / tokyobombers.com / foamgirl.net / hotgirl.asia / phimvuspot.com 等站点"
                 @keydown.enter.prevent="parseGallery"
               />
             </div>
@@ -135,7 +135,7 @@
             <div class="flex flex-col gap-2.5 text-xs text-on-surface-variant">
               <div class="flex items-start gap-2">
                 <span class="material-symbols-outlined text-primary text-sm mt-0.5">looks_one</span>
-                <span>粘贴 4khd / szzs / kkc3 / photos18 / tokyobombers / foamgirl / hotgirl 等图站链接，点击「解析图集」获取图集信息</span>
+                <span>粘贴 4khd / szzs / kkc3 / photos18 / tokyobombers / foamgirl / hotgirl / phimvuspot 等图站链接，点击「解析图集」获取图集信息</span>
               </div>
               <div class="flex items-start gap-2">
                 <span class="material-symbols-outlined text-primary text-sm mt-0.5">looks_two</span>
@@ -398,6 +398,7 @@ function getStatusText(status: DownloadTask['status']) {
   }[status]
 }
 </script>
+
 
 
 
