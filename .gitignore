@@ -49,3 +49,6 @@ TODO.md
 CLAUDE.md
 AGENTS.md
 
+# Git worktrees
+.worktrees/
+
