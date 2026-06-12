@@ -340,9 +340,11 @@ async function parseGallery() {
       proxy: proxy.value
     })
     parseResult.value = result
-    // 拉取首张图片作为预览
+    // 优先使用后端返回的预览图（Playwright 站点已捕获），否则通过 fetchImage 拉取
     previewImage.value = ''
-    if (result.image_urls?.length > 0 && window.electronAPI?.app?.fetchImage) {
+    if (result.preview_base64) {
+      previewImage.value = `data:image/jpeg;base64,${result.preview_base64}`
+    } else if (result.image_urls?.length > 0 && window.electronAPI?.app?.fetchImage) {
       const img = await window.electronAPI.app.fetchImage(result.image_urls[0])
       if (img) previewImage.value = img
     }
@@ -398,6 +400,7 @@ function getStatusText(status: DownloadTask['status']) {
   }[status]
 }
 </script>
+
 
 
 

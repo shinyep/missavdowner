@@ -16,6 +16,7 @@ export interface GalleryParseResult {
   page_url: string
   image_count: number
   image_urls: string[]
+  preview_base64?: string
 }
 
 export interface DownloadTask {
@@ -153,3 +154,4 @@ declare global {
     electronAPI: ElectronAPI
   }
 }
+

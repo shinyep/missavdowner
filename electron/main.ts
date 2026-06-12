@@ -503,6 +503,10 @@ function setupIPC() {
       } else if (url.includes('buondua')) {
         // buondua CDN 域名：cdn.buondua.us / i2.buondua.us / cdn.buondua.com
         referer = 'https://buondua.com/'
+      } else if (url.includes('photos18.com')) {
+        referer = 'https://www.photos18.com/'
+      } else if (url.includes('phimvuspot.com') || url.includes('thismore.fun') || url.includes('wp.com/im.thismore')) {
+        referer = 'https://m.phimvuspot.com/'
       }
       const response = await net.fetch(url, {
         headers: {
@@ -544,3 +548,4 @@ app.on('activate', () => {
 app.on('before-quit', () => {
   stopPythonBackend()
 })
+

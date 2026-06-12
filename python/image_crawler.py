@@ -53,6 +53,7 @@ class GalleryParseResult:
     title: str
     page_url: str
     image_urls: list[str]
+    preview_base64: str = ""  # 首张图片 base64（Playwright 站点专用）
 
 
 class ImageGalleryCrawler:
@@ -769,6 +770,7 @@ class ImageGalleryCrawler:
         all_image_urls: list[str] = []
         seen_urls: set[str] = set()
         gallery_title = ""
+        preview_b64 = ""
 
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(headless=True)
@@ -784,7 +786,7 @@ class ImageGalleryCrawler:
                 page_url = gallery_url if page_num == 1 else f"{gallery_url}?page={page_num}"
 
                 page = await context.new_page()
-                captured: dict[str, int] = {}
+                captured: dict[str, bytes] = {}
 
                 async def on_response(response):
                     url = response.url
@@ -792,7 +794,7 @@ class ImageGalleryCrawler:
                         try:
                             body = await response.body()
                             if len(body) > 5000:
-                                captured[url] = len(body)
+                                captured[url] = body
                         except Exception:
                             pass
 
@@ -828,6 +830,15 @@ class ImageGalleryCrawler:
                         seen_urls.add(img_url)
                         all_image_urls.append(img_url)
 
+                # 捕获首张内容图的 base64 用于预览
+                if not preview_b64 and page_images:
+                    first_base = page_images[0].split("?")[0]
+                    for cap_url, cap_body in captured.items():
+                        if cap_url.split("?")[0] == first_base:
+                            import base64
+                            preview_b64 = base64.b64encode(cap_body).decode("ascii")
+                            break
+
             await browser.close()
 
         if not all_image_urls:
@@ -837,6 +848,7 @@ class ImageGalleryCrawler:
             title=gallery_title,
             page_url=gallery_url,
             image_urls=all_image_urls,
+            preview_base64=preview_b64,
         )
 
     def _extract_phimvuspot_title(self, soup: BeautifulSoup) -> str:
@@ -936,6 +948,7 @@ class ImageGalleryCrawler:
         all_image_urls: list[str] = []
         seen_urls: set[str] = set()
         gallery_title = ""
+        preview_b64 = ""
 
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(headless=True)
@@ -950,7 +963,31 @@ class ImageGalleryCrawler:
                 page_url = gallery_url if page_num == 1 else f"{gallery_url}?num={page_num}"
 
                 # 用 Playwright 加载页面，自动通过 Cloudflare challenge
-                html_content = await self._hotgirl_fetch_with_playwright(context, page_url)
+                # 同时拦截图片响应捕获首张预览
+                page = await context.new_page()
+                captured: dict[str, bytes] = {}
+
+                async def on_response(response):
+                    url = response.url
+                    if "everiaclub.com" in url and response.status == 200:
+                        try:
+                            body = await response.body()
+                            if len(body) > 5000:
+                                captured[url] = body
+                        except Exception:
+                            pass
+
+                page.on("response", on_response)
+
+                try:
+                    await page.goto(page_url, wait_until="networkidle", timeout=60000)
+                    await page.wait_for_timeout(2000)
+                    html_content = await page.content()
+                except Exception:
+                    html_content = ""
+                finally:
+                    await page.close()
+
                 if not html_content:
                     break
 
@@ -972,6 +1009,14 @@ class ImageGalleryCrawler:
                         seen_urls.add(img_url)
                         all_image_urls.append(img_url)
 
+                # 捕获首张内容图的 base64 用于预览
+                if not preview_b64 and page_images:
+                    import base64 as _b64
+                    for cap_url, cap_body in captured.items():
+                        if cap_url in seen_urls:
+                            preview_b64 = _b64.b64encode(cap_body).decode("ascii")
+                            break
+
                 # 检查是否有下一页
                 if not self._hotgirl_has_next_page(soup, page_num):
                     break
@@ -985,6 +1030,7 @@ class ImageGalleryCrawler:
             title=gallery_title,
             page_url=gallery_url,
             image_urls=all_image_urls,
+            preview_base64=preview_b64,
         )
 
     async def _hotgirl_fetch_with_playwright(self, context, url: str) -> str:
@@ -1758,6 +1804,12 @@ class ImageGalleryCrawler:
     def _notify(self, callback: ProgressCallback | None, progress: float, speed: str, phase: str, detail: str, extra: dict | None = None) -> None:
         if callback:
             callback(round(progress, 2), speed, phase, detail, extra or {})
+
+
+
+
+
+
 
 
 
