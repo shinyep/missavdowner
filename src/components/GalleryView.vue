@@ -276,6 +276,30 @@
                 </div>
               </div>
 
+              <div
+                v-if="(task.failedImages?.length || 0) > 0"
+                class="rounded-md bg-error/5 border border-error/20 p-2 flex flex-col gap-1 text-[10px] text-on-surface-variant mt-0.5"
+              >
+                <div class="inline-flex items-center gap-1 text-error">
+                  <span class="material-symbols-outlined text-[11px]">broken_image</span>
+                  <span class="font-semibold">失败图片</span>
+                </div>
+                <div
+                  v-for="item in task.failedImages"
+                  :key="`${task.id}-${item.index}`"
+                  class="flex items-center gap-2 rounded-sm bg-surface-container-highest px-2 py-1"
+                >
+                  <span class="flex-1 truncate">第 {{ item.index }} 张：{{ item.reason }}</span>
+                  <button
+                    class="px-2 py-0.5 rounded-sm bg-primary/10 text-primary hover:bg-primary/20 disabled:opacity-50 disabled:cursor-not-allowed"
+                    :disabled="task.retryingImages?.includes(item.index)"
+                    @click="retryFailedImage(task, item.index)"
+                  >
+                    {{ task.retryingImages?.includes(item.index) ? '重试中...' : '重试' }}
+                  </button>
+                </div>
+              </div>
+
               <div class="grid grid-cols-2 gap-2 text-[10px] text-on-surface-variant mt-0.5">
                 <div class="rounded-md bg-surface-container-highest border border-outline-variant/10 p-2 flex flex-col gap-1">
                   <div class="inline-flex items-center gap-1 text-on-surface">
@@ -418,6 +442,8 @@ onMounted(async () => {
     if (data.source !== undefined) task.source = data.source
     if (data.galleryId !== undefined) task.galleryId = data.galleryId
     if (data.novelVideoId !== undefined) task.novelVideoId = data.novelVideoId
+    if (data.failedImages !== undefined) task.failedImages = data.failedImages
+    if (data.retryingImages !== undefined) task.retryingImages = data.retryingImages
   })
 
   window.electronAPI?.onDownloadCompleted?.((data) => {
@@ -425,6 +451,11 @@ onMounted(async () => {
     if (!task) return
     task.filename = data.filename || task.filename
     if (data.outputPath) task.outputPath = data.outputPath
+    if (data.totalImages !== undefined) task.totalImages = task.totalImages ?? data.totalImages
+    if (data.successCount !== undefined) task.successCount = task.successCount ?? data.successCount
+    if (data.failedCount !== undefined) task.failedCount = task.failedCount ?? data.failedCount
+    if (data.galleryId !== undefined) task.galleryId = task.galleryId ?? data.galleryId
+    if (data.novelVideoId !== undefined) task.novelVideoId = task.novelVideoId ?? data.novelVideoId
     task.status = 'completed'
     task.progress = 100
     successMsg.value = `图集任务完成：${task.filename}`
@@ -510,6 +541,25 @@ async function startDownload() {
     errorMsg.value = err.message || '图集下载失败'
   } finally {
     isDownloading.value = false
+  }
+}
+
+async function retryFailedImage(task: DownloadTask, index: number) {
+  errorMsg.value = ''
+  try {
+    const result = await window.electronAPI.gallery.retryImage({
+      taskId: task.id,
+      index,
+      proxy: proxy.value
+    })
+    task.successCount = result.task.successCount
+    task.failedCount = result.task.failedCount
+    task.failedImages = result.task.failedImages
+    task.retryingImages = result.task.retryingImages
+    task.detail = result.task.detail
+    successMsg.value = `第 ${index} 张图片补下载成功`
+  } catch (err: any) {
+    errorMsg.value = err.message || `第 ${index} 张图片重试失败`
   }
 }
 

@@ -137,29 +137,35 @@ class ImageGalleryCrawler:
 
         saved_paths: list[str] = []
         failed_count = 0
+        failed_images: list[dict] = []
         total = len(parsed.image_urls)
         self._notify(progress_callback, 0, "0 张/秒", "downloading", f"共发现 {total} 张图片，开始下载", {
-            "total_images": total, "current_index": 0, "success_count": 0, "failed_count": 0, "title": parsed.title,
+            "total_images": total,
+            "current_index": 0,
+            "success_count": 0,
+            "failed_count": 0,
+            "failed_images": list(failed_images),
+            "title": parsed.title,
         })
 
         # 判断是否有 Cloudflare 保护的 CDN 图片（需要 Playwright 下载）
         needs_playwright = any("everiaclub.com" in url or "thismore.fun" in url or "wp.com/im.thismore" in url for url in parsed.image_urls)
 
         if needs_playwright and async_playwright is not None:
-            # Playwright 方式：在页面上下文中逐张下载图片
+            # Playwright 用浏览器上下文下载，可处理受 Cloudflare 保护的图片。
             await self._download_images_with_playwright(
                 parsed, gallery_dir, saved_paths, failed_count,
                 progress_callback, started_at, total,
             )
         else:
-            # httpx 方式：常规下载
+            # httpx 直接复用 Referer 和请求头，适合普通图片链接下载。
             async with httpx.AsyncClient(
                 **self._client_options({"User-Agent": USER_AGENT, "Referer": parsed.page_url})
             ) as client:
                 for index, image_url in enumerate(parsed.image_urls, start=1):
                     detail = f"正在下载第 {index}/{total} 张图片"
                     try:
-                        image_bytes = await self._download_image(client, image_url, parsed.page_url)
+                        image_bytes = await self._download_image_with_retry(client, image_url, parsed.page_url)
                         ext = self._detect_extension(image_url, image_bytes)
                         filename = f"{index:03d}{ext}"
                         image_path = gallery_dir / filename
@@ -167,13 +173,22 @@ class ImageGalleryCrawler:
                         saved_paths.append(str(image_path))
                     except Exception as exc:
                         failed_count += 1
+                        failed_images.append({
+                            "index": index,
+                            "image_url": image_url,
+                            "reason": str(exc)[:120],
+                        })
                         detail = f"第 {index}/{total} 张下载失败：{str(exc)[:60]}"
 
                     elapsed = max(time.time() - started_at, 0.1)
                     speed = f"{len(saved_paths) / elapsed:.2f} 张/秒"
                     self._notify(progress_callback, index / total * 100, speed, "downloading", detail, {
-                        "total_images": total, "current_index": index,
-                        "success_count": len(saved_paths), "failed_count": failed_count, "title": parsed.title,
+                        "total_images": total,
+                        "current_index": index,
+                        "success_count": len(saved_paths),
+                        "failed_count": failed_count,
+                        "failed_images": list(failed_images),
+                        "title": parsed.title,
                     })
                     await asyncio.sleep(0.3)
 
@@ -186,9 +201,45 @@ class ImageGalleryCrawler:
             "output_path": str(gallery_dir),
             "image_count": len(saved_paths),
             "image_paths": saved_paths,
+            "failed_images": failed_images,
             "video_url": parsed.video_url,
             "source_url": gallery_url,
         }
+
+    async def download_single_image(
+        self,
+        image_url: str,
+        referer_url: str,
+        output_path: str,
+    ) -> str:
+        output = Path(output_path).expanduser().resolve()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        async with httpx.AsyncClient(
+            **self._client_options({"User-Agent": USER_AGENT, "Referer": referer_url})
+        ) as client:
+            image_bytes = await self._download_image_with_retry(client, image_url, referer_url)
+        output.write_bytes(image_bytes)
+        return str(output)
+
+
+    async def _download_image_with_retry(
+        self,
+        client: httpx.AsyncClient,
+        image_url: str,
+        referer_url: str,
+        max_attempts: int = 3,
+    ) -> bytes:
+        """下载单张图片，失败时按固定次数重试。"""
+        last_exc: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return await self._download_image(client, image_url, referer_url)
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= max_attempts:
+                    break
+                await asyncio.sleep(min(0.5 * attempt, 1.5))
+        raise RuntimeError(f"已重试 {max_attempts} 次，仍然下载失败：{last_exc}") from last_exc
 
 
     async def _download_images_with_playwright(
@@ -1894,7 +1945,7 @@ class ImageGalleryCrawler:
 
     @staticmethod
     def _is_xx_knit_bid_url(url: str) -> bool:
-        """????? xx.knit.bid ????"""
+        """判断是否为 xx.knit.bid 图集链接。"""
         return "xx.knit.bid" in urlparse(url).netloc.lower()
 
     async def _parse_xx_knit_bid_gallery(self, gallery_url: str) -> GalleryParseResult:
@@ -1971,7 +2022,7 @@ class ImageGalleryCrawler:
 
 
     def _extract_xx_knit_bid_jsonld(self, soup: BeautifulSoup) -> dict:
-        """?? xx.knit.bid ???? ImageGallery JSON-LD?"""
+        """提取 xx.knit.bid 页面中的 ImageGallery JSON-LD。"""
         for script in soup.select('script[type="application/ld+json"]'):
             raw = script.string or script.get_text()
             if not raw or "ImageGallery" not in raw:
@@ -1989,7 +2040,7 @@ class ImageGalleryCrawler:
         return {}
 
     def _extract_xx_knit_bid_title(self, soup: BeautifulSoup, json_ld: dict) -> str:
-        """?? xx.knit.bid ????????? JSON-LD name?"""
+        """提取 xx.knit.bid 图集标题，优先使用 JSON-LD 的 name。"""
         title = self._clean_title(json_ld.get("name")) if json_ld else None
         if title:
             return title
@@ -2005,7 +2056,7 @@ class ImageGalleryCrawler:
         return self._extract_gallery_title(soup, soup.title.get_text() if soup.title else "")
 
     def _extract_xx_knit_bid_images_from_jsonld(self, json_ld: dict, base_url: str) -> list[str]:
-        """? xx.knit.bid ? ImageGallery JSON-LD ????? URL?"""
+        """从 xx.knit.bid 的 ImageGallery JSON-LD 中提取图片链接。"""
         if not json_ld:
             return []
         items = json_ld.get("itemListElement") or []
@@ -2023,7 +2074,7 @@ class ImageGalleryCrawler:
         return result
 
     def _detect_xx_knit_bid_total_pages(self, json_ld: dict) -> int:
-        """?? xx.knit.bid ???????"""
+        """提取 xx.knit.bid 图集的分页总数。"""
         if not json_ld:
             return 1
         pagination = json_ld.get("pagination") or {}
@@ -2033,7 +2084,7 @@ class ImageGalleryCrawler:
         return 1
 
     def _extract_xx_knit_bid_images_from_soup(self, soup: BeautifulSoup, base_url: str) -> list[str]:
-        """xx.knit.bid ????????????? JSON-LD ????"""
+        """当 xx.knit.bid 缺少 JSON-LD 时，从正文 DOM 中兜底提取图片。"""
         found: list[str] = []
         seen: set[str] = set()
         for container in [soup.select_one(".article-content"), soup.select_one("article"), soup]:

@@ -22,6 +22,12 @@ export interface GalleryParseResult {
   preview_base64?: string
 }
 
+export interface FailedGalleryImage {
+  index: number
+  image_url: string
+  reason: string
+}
+
 export interface DownloadTask {
   id: string
   filename: string
@@ -64,6 +70,10 @@ export interface DownloadTask {
   source?: string
   /** Novel 图集 ID */
   galleryId?: number
+  /** 失败图片明细 */
+  failedImages?: FailedGalleryImage[]
+  /** 正在重试的图片序号 */
+  retryingImages?: number[]
 }
 
 export interface HistoryRecord {
@@ -135,6 +145,7 @@ export interface ElectronAPI {
   gallery: {
     parse: (options: { galleryUrl: string; proxy?: string }) => Promise<GalleryParseResult>
     download: (options: { galleryUrl: string; outputDir: string; downloadMode?: 'local' | 'novel'; novelProjectPath?: string; proxy?: string }) => Promise<DownloadTask>
+    retryImage: (options: { taskId: string; index: number; proxy?: string }) => Promise<{ success: boolean; savedPath?: string; task: DownloadTask }>
   }
   onDownloadProgress: (callback: (data: {
     taskId: string
@@ -156,8 +167,19 @@ export interface ElectronAPI {
     source?: string
     galleryId?: number
     novelVideoId?: number
+    failedImages?: FailedGalleryImage[]
+    retryingImages?: number[]
   }) => void) => () => void
-  onDownloadCompleted: (callback: (data: { taskId: string; filename: string; outputPath?: string }) => void) => () => void
+  onDownloadCompleted: (callback: (data: {
+    taskId: string
+    filename: string
+    outputPath?: string
+    totalImages?: number
+    successCount?: number
+    failedCount?: number
+    galleryId?: number
+    novelVideoId?: number
+  }) => void) => () => void
   onDownloadError: (callback: (data: { taskId: string; error: string }) => void) => () => void
   history: {
     get: () => Promise<HistoryRecord[]>

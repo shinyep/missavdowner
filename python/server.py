@@ -1,7 +1,3 @@
-﻿"""
-Flask HTTP server - provides API for Electron app.
-Supports missav.ws and kissjav.com
-"""
 import asyncio
 import json
 import os
@@ -45,6 +41,70 @@ download_tasks: dict[str, dict] = {}
 def _is_xx_knit_bid_gallery_url(url: str) -> bool:
     hostname = (urlparse(url).hostname or '').lower()
     return 'xx.knit.bid' in hostname
+
+
+def _resolve_task_failed_images(task: dict) -> list[dict]:
+    failed_images = task.get('failedImages') or []
+    return [item for item in failed_images if isinstance(item, dict)]
+
+
+def _infer_missing_failed_images(task: dict) -> list[dict]:
+    gallery_url = task.get('url') or ''
+    output_path = task.get('output_path') or ''
+    if not gallery_url or not output_path:
+        return []
+
+    crawler = ImageGalleryCrawler(proxy='')
+    parsed = run_async(crawler.parse_gallery(gallery_url))
+    output_dir = Path(output_path).expanduser().resolve()
+    existing_indices: set[int] = set()
+    for file_path in output_dir.glob('*'):
+        if not file_path.is_file():
+            continue
+        match = re.search(r'(\d{3})(?:\.[^.]+)?$', file_path.name)
+        if match:
+            existing_indices.add(int(match.group(1)))
+
+    missing: list[dict] = []
+    for index, image_url in enumerate(parsed.image_urls, start=1):
+        if index not in existing_indices:
+            missing.append({
+                'index': index,
+                'image_url': image_url,
+                'reason': '旧任务未保留失败明细，按目录缺口推断',
+            })
+    return missing
+
+
+def _download_single_gallery_image(task: dict, failed_item: dict, proxy: str = '') -> dict:
+    crawler = ImageGalleryCrawler(proxy=proxy)
+    index = int(failed_item.get('index', 0))
+    if index <= 0:
+        raise RuntimeError('无效的失败图片序号')
+
+    image_url = failed_item.get('image_url') or ''
+    if not image_url:
+        raise RuntimeError('失败图片缺少原始 URL')
+
+    suffix = Path(urlparse(image_url).path).suffix.lower() or '.jpg'
+    target_dir = Path(task.get('output_path') or '').expanduser().resolve()
+    if not str(target_dir):
+        raise RuntimeError('任务缺少输出目录')
+
+    gallery_id = task.get('gallery_id')
+    if task.get('downloadMode') == 'novel' and gallery_id:
+        file_name = f'{gallery_id}_{index:03d}{suffix}'
+    else:
+        file_name = f'{index:03d}{suffix}'
+
+    saved_path = run_async(
+        crawler.download_single_image(
+            image_url=image_url,
+            referer_url=task.get('url') or image_url,
+            output_path=str((target_dir / file_name).resolve()),
+        )
+    )
+    return {'saved_path': saved_path, 'image_count': 1}
 
 # ----- History -----
 def get_history_file():
@@ -365,7 +425,6 @@ def parse_gallery():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/gallery/download', methods=['POST'])
-
 def start_gallery_download():
     data = request.get_json()
     gallery_url = data.get('galleryUrl', '')
@@ -394,6 +453,7 @@ def start_gallery_download():
         'detail': '', 'transcodeProgress': 0,
         'downloadMode': download_mode, 'source': 'gallery',
         'has_video': False, 'video_count': 0, 'media_type': 'gallery',
+        'failedImages': [], 'retryingImages': [],
     }
 
     def _progress(progress, speed, phase=None, detail=None, extra=None):
@@ -406,10 +466,12 @@ def start_gallery_download():
         if detail:
             task['detail'] = detail
         if extra:
-            task['total_images'] = extra.get('total_images')
-            task['current_index'] = extra.get('current_index')
-            task['success_count'] = extra.get('success_count')
-            task['failed_count'] = extra.get('failed_count')
+            task['totalImages'] = extra.get('total_images')
+            task['currentIndex'] = extra.get('current_index')
+            task['successCount'] = extra.get('success_count')
+            task['failedCount'] = extra.get('failed_count')
+            if extra.get('failed_images') is not None:
+                task['failedImages'] = extra.get('failed_images')
             if extra.get('title'):
                 task['filename'] = extra['title']
 
@@ -425,6 +487,8 @@ def start_gallery_download():
             task['video_count'] = 1 if result.get('video_url') else 0
             task['media_type'] = 'gallery_with_video' if result.get('video_url') else 'gallery'
             task['detail'] = f"已下载 {result['image_count']} 张图片"
+            if result.get('failed_images') is not None:
+                task['failedImages'] = result.get('failed_images')
             cache_src_path = result.get('output_path', '')
 
             if download_mode == 'novel':
@@ -435,7 +499,10 @@ def start_gallery_download():
                 if not import_result.get('success'):
                     raise RuntimeError(import_result.get('message') or 'Novel 图片入库失败')
                 gallery_id = import_result.get('gallery_id')
+                imported_image_count = import_result.get('image_count')
                 task['gallery_id'] = gallery_id
+                if imported_image_count is not None:
+                    task['successCount'] = imported_image_count
                 task['detail'] = import_result.get('message', '图片入库完成')
                 novel_img_dir = os.path.join(novel_project_path, 'img', 'gallery_images', str(gallery_id))
                 task['output_path'] = novel_img_dir
@@ -544,6 +611,46 @@ def get_download_status(task_id):
         return jsonify({'error': 'Task not found'}), 404
     return jsonify(task)
 
+
+@app.route('/api/gallery/retry-image', methods=['POST'])
+def retry_gallery_image():
+    data = request.get_json() or {}
+    task_id = data.get('taskId', '')
+    index = int(data.get('index', 0) or 0)
+    proxy = data.get('proxy', '')
+
+    task = download_tasks.get(task_id)
+    if not task:
+        return jsonify({'error': 'Task not found'}), 404
+    if index <= 0:
+        return jsonify({'error': '无效的图片序号'}), 400
+
+    failed_images = _resolve_task_failed_images(task)
+    if not failed_images:
+        failed_images = _infer_missing_failed_images(task)
+    failed_item = next((item for item in failed_images if int(item.get('index', 0) or 0) == index), None)
+    if not failed_item:
+        return jsonify({'error': f'未找到第 {index} 张失败图片'}), 400
+
+    retrying = set(task.get('retryingImages') or [])
+    retrying.add(index)
+    task['retryingImages'] = sorted(retrying)
+
+    try:
+        result = _download_single_gallery_image(task, failed_item, proxy=proxy)
+        task['failedImages'] = [
+            item for item in failed_images
+            if int(item.get('index', 0) or 0) != index
+        ]
+        task['retryingImages'] = [item for item in task.get('retryingImages', []) if item != index]
+        task['successCount'] = (task.get('successCount') or 0) + 1
+        task['failedCount'] = max((task.get('failedCount') or 0) - 1, 0)
+        task['detail'] = f'已补下第 {index} 张图片'
+        return jsonify({'success': True, 'savedPath': result['saved_path'], 'task': task})
+    except Exception as exc:
+        task['retryingImages'] = [item for item in task.get('retryingImages', []) if item != index]
+        return jsonify({'error': f'单张重试失败：{str(exc)}'}), 500
+
 @app.route('/api/pause-download/<task_id>', methods=['POST'])
 def pause_download(task_id):
     task = download_tasks.get(task_id)
@@ -583,7 +690,7 @@ def clear_history():
 
 @app.route('/api/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'ok', 'timestamp': int(time.time() * 1000)})
+    return jsonify({'status': 'ok', 'timestamp': int(time.time())})
 
 if __name__ == '__main__':
     import argparse
@@ -592,5 +699,3 @@ if __name__ == '__main__':
     args = parser.parse_args()
     print(f"Starting server on port {args.port}")
     app.run(host='127.0.0.1', port=args.port, debug=False)
-
-

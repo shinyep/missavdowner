@@ -401,19 +401,30 @@ function setupIPC() {
             phaseTitle: progress.phaseTitle,
             detail: progress.detail,
             outputPath: progress.output_path,
+            totalImages: progress.totalImages,
+            currentIndex: progress.currentIndex,
+            successCount: progress.successCount,
+            failedCount: progress.failedCount,
             hasVideo: progress.has_video,
             videoCount: progress.video_count,
             mediaType: progress.media_type,
             source: progress.source,
             galleryId: progress.gallery_id,
             novelVideoId: progress.novel_video_id,
+            failedImages: progress.failedImages,
+            retryingImages: progress.retryingImages,
           })
 
           if (progress.status === 'completed') {
             win?.webContents.send('download:completed', {
               taskId,
               filename: progress.filename || result.filename,
-              outputPath: progress.output_path
+              outputPath: progress.output_path,
+              totalImages: progress.totalImages,
+              successCount: progress.successCount,
+              failedCount: progress.failedCount,
+              galleryId: progress.gallery_id,
+              novelVideoId: progress.novel_video_id,
             })
             return
           }
@@ -455,6 +466,18 @@ function setupIPC() {
       }
     } catch (error: any) {
       throw new Error(error.message || '图集下载失败')
+    }
+  })
+
+  ipcMain.handle('gallery:retryImage', async (_, options: {
+    taskId: string
+    index: number
+    proxy?: string
+  }) => {
+    try {
+      return await callPythonAPI('/api/gallery/retry-image', 'POST', options)
+    } catch (error: any) {
+      throw new Error(error.message || '单张重试失败')
     }
   })
 
