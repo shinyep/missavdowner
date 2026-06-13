@@ -53,6 +53,7 @@ class GalleryParseResult:
     title: str
     page_url: str
     image_urls: list[str]
+    video_url: str = ""
     preview_base64: str = ""  # 首张图片 base64（Playwright 站点专用）
 
 
@@ -185,6 +186,7 @@ class ImageGalleryCrawler:
             "output_path": str(gallery_dir),
             "image_count": len(saved_paths),
             "image_paths": saved_paths,
+            "video_url": parsed.video_url,
             "source_url": gallery_url,
         }
 
@@ -340,12 +342,21 @@ class ImageGalleryCrawler:
                 await browser.close()
 
     async def _load_page_html_with_httpx(self, page_url: str) -> str:
-        async with httpx.AsyncClient(
-            **self._client_options({"User-Agent": USER_AGENT, "Referer": page_url})
-        ) as client:
-            response = await client.get(page_url)
-            response.raise_for_status()
-            return response.text
+        """用 httpx 请求页面，带重试机制，单次超时 30 秒。"""
+        last_exc = None
+        for attempt in range(3):
+            try:
+                options = self._client_options({"User-Agent": USER_AGENT, "Referer": page_url})
+                options["timeout"] = httpx.Timeout(30.0)
+                async with httpx.AsyncClient(**options) as client:
+                    response = await client.get(page_url)
+                    response.raise_for_status()
+                    return response.text
+            except Exception as exc:
+                last_exc = exc
+                if attempt < 2:
+                    await asyncio.sleep(1.0)
+        raise last_exc
 
     async def _download_image(self, client: httpx.AsyncClient, image_url: str, referer_url: str) -> bytes:
         response = await client.get(image_url, headers={"Referer": referer_url, "Accept": "image/avif,image/heif,image/heif-sequence,image/webp,image/apng,image/*,*/*;q=0.8"})
@@ -1887,32 +1898,77 @@ class ImageGalleryCrawler:
         return "xx.knit.bid" in urlparse(url).netloc.lower()
 
     async def _parse_xx_knit_bid_gallery(self, gallery_url: str) -> GalleryParseResult:
-        """?? JSON-LD ???? xx.knit.bid ??????????????"""
-        html_content = await self._load_page_html(gallery_url, gallery_url)
-        soup = BeautifulSoup(html_content, "html.parser")
-        json_ld = self._extract_xx_knit_bid_jsonld(soup)
-        title = self._extract_xx_knit_bid_title(soup, json_ld)
-        image_urls = list(self._extract_xx_knit_bid_images_from_jsonld(json_ld, gallery_url))
-        total_pages = self._detect_xx_knit_bid_total_pages(json_ld)
+        """使用 JSON-LD 优先解析 xx.knit.bid 图集，并兼容后续分页。"""
+        # xx.knit.bid 的 JSON-LD 和图片 URL 都在静态 HTML 中，无需 Playwright 渲染，
+        # 复用同一个 httpx.AsyncClient 避免重复建立代理隧道连接。
 
-        if total_pages > 1:
+        client_options = self._client_options({"User-Agent": USER_AGENT})
+        client_options["timeout"] = httpx.Timeout(30.0)
+
+        async with httpx.AsyncClient(**client_options) as client:
+            async def load_page(url: str) -> str:
+                response = await client.get(url)
+                response.raise_for_status()
+                return response.text
+
+            html_content = await load_page(gallery_url)
+            soup = BeautifulSoup(html_content, "html.parser")
+            json_ld = self._extract_xx_knit_bid_jsonld(soup)
+            title = self._extract_xx_knit_bid_title(soup, json_ld)
+            video_url = self._extract_xx_knit_bid_video_url(soup, json_ld, gallery_url)
+            image_urls: list[str] = []
+            seen: set[str] = set()
+
+            def add(urls):
+                for u in urls:
+                    if u and u not in seen:
+                        seen.add(u)
+                        image_urls.append(u)
+
+            add(self._extract_xx_knit_bid_images_from_jsonld(json_ld, gallery_url))
+            if not image_urls:
+                add(self._extract_xx_knit_bid_images_from_soup(soup, gallery_url))
+
+            total_pages = self._detect_xx_knit_bid_total_pages(json_ld)
+            if total_pages < 1:
+                total_pages = 1
+
             base_url = gallery_url.rstrip("/")
-            for page_num in range(2, total_pages + 1):
-                page_url = f"{base_url}/page/{page_num}/"
-                page_html = await self._load_page_html(page_url, page_url)
-                page_soup = BeautifulSoup(page_html, "html.parser")
-                page_json_ld = self._extract_xx_knit_bid_jsonld(page_soup)
-                page_images = self._extract_xx_knit_bid_images_from_jsonld(page_json_ld, page_url)
-                if not page_images:
-                    page_images = self._extract_xx_knit_bid_images_from_soup(page_soup, page_url)
-                for img_url in page_images:
-                    if img_url not in image_urls:
-                        image_urls.append(img_url)
+            pending = list(range(2, total_pages + 1))
+            retries = 2
+
+            while pending:
+                failed = []
+                for page_num in pending:
+                    page_url = f"{base_url}/page/{page_num}/"
+                    try:
+                        page_html = await load_page(page_url)
+                        page_soup = BeautifulSoup(page_html, "html.parser")
+                        page_json_ld = self._extract_xx_knit_bid_jsonld(page_soup)
+                        page_images = self._extract_xx_knit_bid_images_from_jsonld(page_json_ld, page_url)
+                        if not page_images:
+                            page_images = self._extract_xx_knit_bid_images_from_soup(page_soup, page_url)
+                        add(page_images)
+                    except Exception:
+                        failed.append(page_num)
+                    await asyncio.sleep(0.5)
+                if not failed:
+                    break
+                if retries <= 0:
+                    break
+                retries -= 1
+                pending = failed
 
         if not image_urls:
-            raise RuntimeError("?????????????")
+            raise RuntimeError("未从图集页面提取到图片链接")
 
-        return GalleryParseResult(title=title, page_url=gallery_url, image_urls=image_urls)
+        return GalleryParseResult(
+            title=title,
+            page_url=gallery_url,
+            image_urls=image_urls,
+            video_url=video_url,
+        )
+
 
     def _extract_xx_knit_bid_jsonld(self, soup: BeautifulSoup) -> dict:
         """?? xx.knit.bid ???? ImageGallery JSON-LD?"""
@@ -1995,3 +2051,42 @@ class ImageGalleryCrawler:
             if found:
                 return found
         return found
+
+    def _extract_xx_knit_bid_video_url(self, soup: BeautifulSoup, json_ld: dict, base_url: str) -> str:
+        """提取 xx.knit.bid 图集正文中的视频播放地址。"""
+        video_source = soup.select_one("video source[src]")
+        if video_source:
+            source_url = (video_source.get("src") or "").strip()
+            if source_url:
+                return urljoin(base_url, source_url)
+
+        download_panel = soup.select_one(".vip-mp4-download-panel[data-source-url]")
+        if download_panel:
+            source_url = (download_panel.get("data-source-url") or "").strip()
+            if source_url:
+                return urljoin(base_url, source_url)
+
+        content_url = (json_ld or {}).get("contentUrl")
+        if isinstance(content_url, str) and content_url.strip():
+            return urljoin(base_url, content_url.strip())
+
+        for script in soup.select('script[type="application/ld+json"]'):
+            raw = script.string or script.get_text()
+            if not raw or "contentUrl" not in raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except Exception:
+                continue
+            if isinstance(data, dict):
+                content_url = data.get("contentUrl")
+                if isinstance(content_url, str) and content_url.strip():
+                    return urljoin(base_url, content_url.strip())
+            elif isinstance(data, list):
+                for item in data:
+                    if not isinstance(item, dict):
+                        continue
+                    content_url = item.get("contentUrl")
+                    if isinstance(content_url, str) and content_url.strip():
+                        return urljoin(base_url, content_url.strip())
+        return ""

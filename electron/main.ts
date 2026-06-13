@@ -1,4 +1,4 @@
-﻿import { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard, net } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard, net } from 'electron'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { spawn, ChildProcess } from 'node:child_process'
@@ -401,6 +401,12 @@ function setupIPC() {
             phaseTitle: progress.phaseTitle,
             detail: progress.detail,
             outputPath: progress.output_path,
+            hasVideo: progress.has_video,
+            videoCount: progress.video_count,
+            mediaType: progress.media_type,
+            source: progress.source,
+            galleryId: progress.gallery_id,
+            novelVideoId: progress.novel_video_id,
           })
 
           if (progress.status === 'completed') {
@@ -442,6 +448,10 @@ function setupIPC() {
         downloadMode: options.downloadMode || 'local',
         phase: 'parsing',
         phaseTitle: '解析图集',
+        hasVideo: false,
+        videoCount: 0,
+        mediaType: 'gallery',
+        source: 'gallery',
       }
     } catch (error: any) {
       throw new Error(error.message || '图集下载失败')
@@ -507,6 +517,14 @@ function setupIPC() {
         referer = 'https://www.photos18.com/'
       } else if (url.includes('phimvuspot.com') || url.includes('thismore.fun') || url.includes('wp.com/im.thismore')) {
         referer = 'https://m.phimvuspot.com/'
+      } else if (url.includes('foamgirl.net') || url.includes('cdn.foamgirl.net')) {
+        referer = 'https://foamgirl.net/'
+      } else if (url.includes('tokyobombers.com')) {
+        referer = 'https://www.tokyobombers.com/'
+      } else if (url.includes('everiaclub.com') || url.includes('hotgirl.asia')) {
+        referer = 'https://hotgirl.asia/'
+      } else if (url.includes('xx.knit.bid')) {
+        referer = 'https://xx.knit.bid/'
       }
       const response = await net.fetch(url, {
         headers: {
@@ -548,4 +566,5 @@ app.on('activate', () => {
 app.on('before-quit', () => {
   stopPythonBackend()
 })
+
 

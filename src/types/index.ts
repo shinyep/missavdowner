@@ -16,6 +16,9 @@ export interface GalleryParseResult {
   page_url: string
   image_count: number
   image_urls: string[]
+  has_video?: boolean
+  video_count?: number
+  video_url?: string
   preview_base64?: string
 }
 
@@ -51,6 +54,16 @@ export interface DownloadTask {
   successCount?: number
   /** 下载失败数 */
   failedCount?: number
+  /** 图集是否附带视频 */
+  hasVideo?: boolean
+  /** 图集附带视频数量 */
+  videoCount?: number
+  /** 队列媒体类型 */
+  mediaType?: 'gallery' | 'gallery_with_video'
+  /** 站点来源 */
+  source?: string
+  /** Novel 图集 ID */
+  galleryId?: number
 }
 
 export interface HistoryRecord {
@@ -137,6 +150,12 @@ export interface ElectronAPI {
     currentIndex?: number
     successCount?: number
     failedCount?: number
+    hasVideo?: boolean
+    videoCount?: number
+    mediaType?: DownloadTask['mediaType']
+    source?: string
+    galleryId?: number
+    novelVideoId?: number
   }) => void) => () => void
   onDownloadCompleted: (callback: (data: { taskId: string; filename: string; outputPath?: string }) => void) => () => void
   onDownloadError: (callback: (data: { taskId: string; error: string }) => void) => () => void

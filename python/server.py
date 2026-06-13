@@ -41,6 +41,11 @@ CORS(app)
 
 download_tasks: dict[str, dict] = {}
 
+
+def _is_xx_knit_bid_gallery_url(url: str) -> bool:
+    hostname = (urlparse(url).hostname or '').lower()
+    return 'xx.knit.bid' in hostname
+
 # ----- History -----
 def get_history_file():
     d = os.environ.get('MISSAV_HISTORY_DIR')
@@ -351,6 +356,9 @@ def parse_gallery():
             'page_url': result.page_url,
             'image_count': len(result.image_urls),
             'image_urls': result.image_urls,
+            'has_video': bool(result.video_url),
+            'video_count': 1 if result.video_url else 0,
+            'video_url': result.video_url,
         })
     except Exception as e:
         print(f"[Gallery Parse] Error: {e}")
@@ -385,6 +393,7 @@ def start_gallery_download():
         'phase': 'parsing', 'phaseTitle': _phase_title('parsing'),
         'detail': '', 'transcodeProgress': 0,
         'downloadMode': download_mode, 'source': 'gallery',
+        'has_video': False, 'video_count': 0, 'media_type': 'gallery',
     }
 
     def _progress(progress, speed, phase=None, detail=None, extra=None):
@@ -412,6 +421,9 @@ def start_gallery_download():
             task['filename'] = result['filename']
             task['output_path'] = result['output_path']
             task['video_info'] = {'title': result['title'], 'cover': '', 'actresses': [], 'tags': [], 'code': '', 'source_url': gallery_url}
+            task['has_video'] = bool(result.get('video_url'))
+            task['video_count'] = 1 if result.get('video_url') else 0
+            task['media_type'] = 'gallery_with_video' if result.get('video_url') else 'gallery'
             task['detail'] = f"已下载 {result['image_count']} 张图片"
             cache_src_path = result.get('output_path', '')
 
@@ -428,6 +440,48 @@ def start_gallery_download():
                 novel_img_dir = os.path.join(novel_project_path, 'img', 'gallery_images', str(gallery_id))
                 task['output_path'] = novel_img_dir
                 result['output_path'] = novel_img_dir
+                video_url = result.get('video_url') or ''
+                if gallery_id and video_url and _is_xx_knit_bid_gallery_url(gallery_url):
+                    task['phase'] = 'downloading'
+                    task['phaseTitle'] = _phase_title('downloading')
+                    task['detail'] = '图片已入库，正在下载附带视频...'
+                    cache_video_dir = Path(novel_project_path) / 'img' / 'gallery-cache-video'
+                    cache_video_dir.mkdir(parents=True, exist_ok=True)
+                    safe_name = "".join(c for c in result['title'] if c.isalnum() or c in ' _-').strip()[:50] or 'gallery_video'
+                    video_output_path = str((cache_video_dir / f"{safe_name}.mp4").resolve())
+                    missav_downloader.set_proxy(proxy if proxy else None)
+                    run_async(
+                        missav_downloader.download_video(
+                            video_url,
+                            gallery_url,
+                            video_output_path,
+                            auto_merge=True,
+                            keep_temp_files=False,
+                        )
+                    )
+                    task['phase'] = 'importing'
+                    task['phaseTitle'] = _phase_title('importing')
+                    task['detail'] = '正在把附带视频挂到同一个 Gallery...'
+                    video_import_result = import_video_to_novel(
+                        novel_project_path,
+                        video_output_path,
+                        result['title'],
+                        cover_url='',
+                        source='missav',
+                        gallery_id=gallery_id,
+                    )
+                    if not video_import_result.get('success'):
+                        raise RuntimeError(video_import_result.get('message') or 'Novel 视频入库失败')
+                    task['novel_video_id'] = video_import_result.get('video_id')
+                    task['detail'] = (
+                        f"{import_result.get('message', '图片入库完成')}；"
+                        f"{video_import_result.get('message', '视频入库完成')}"
+                    )
+                    try:
+                        if os.path.exists(video_output_path):
+                            os.remove(video_output_path)
+                    except Exception as cleanup_err:
+                        print(f"[Gallery] 视频缓存清理跳过: {cleanup_err}")
                 import shutil
                 try:
                     gallery_dir = Path(cache_src_path)

@@ -396,14 +396,19 @@ class VideoDownloader:
                 client_kwargs['proxy'] = self._proxy
 
             async with httpx.AsyncClient(**client_kwargs) as client:
-                m3u8_resp = await client.get(m3u8_url)
-                m3u8_resp.raise_for_status()
+                m3u8_resp = None
+                last_m3u8_exc = None
+                for _ in range(3):
+                    try:
+                        m3u8_resp = await client.get(m3u8_url)
+                        m3u8_resp.raise_for_status()
+                        break
+                    except Exception as exc:
+                        last_m3u8_exc = exc
+                        await asyncio.sleep(1.0)
+                if m3u8_resp is None:
+                    raise last_m3u8_exc
                 playlist_content = m3u8_resp.text
-
-                # 修复 m3u8 内容（.jpeg -> .ts）
-                fixed_content = playlist_content.replace('.jpeg', '.ts')
-                local_m3u8 = temp_dir / "playlist.m3u8"
-                local_m3u8.write_text(fixed_content)
 
                 # 2. 解析所有片段 URL
                 segment_urls = [
@@ -414,6 +419,18 @@ class VideoDownloader:
                 total_segments = len(segment_urls)
                 print(f"发现 {total_segments} 个视频片段")
 
+                # 生成指向本地分片文件的 m3u8，供 ffmpeg 离线合并。
+                local_playlist_lines: list[str] = []
+                for line in playlist_content.splitlines():
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith('#'):
+                        local_playlist_lines.append(line)
+                        continue
+                    filename = Path(urlparse(urljoin(m3u8_url, stripped)).path).name.replace('.jpeg', '.ts')
+                    local_playlist_lines.append(filename)
+                local_m3u8 = temp_dir / "playlist.m3u8"
+                local_m3u8.write_text("\n".join(local_playlist_lines), encoding='utf-8')
+
                 # 3. 并发下载所有片段
                 downloaded = 0
                 sem = asyncio.Semaphore(self._max_concurrent)
@@ -421,19 +438,24 @@ class VideoDownloader:
                 async def download_segment(seg_url: str):
                     nonlocal downloaded
                     async with sem:
-                        try:
-                            resp = await client.get(seg_url, headers={**self.headers, 'Referer': referer}, timeout=30)
-                            if resp.status_code == 200:
-                                filename = Path(urlparse(seg_url).path).name.replace('.jpeg', '.ts')
-                                (temp_dir / filename).write_bytes(resp.content)
-                                downloaded += 1
-                                if progress_callback:
-                                    try:
-                                        progress_callback(downloaded / total_segments * 50, f"{downloaded}/{total_segments}", 'download_segments')
-                                    except TypeError:
-                                        progress_callback(downloaded / total_segments * 50, f"{downloaded}/{total_segments}")
-                        except Exception as e:
-                            print(f"下载片段失败: {e}")
+                        last_seg_exc = None
+                        for _ in range(3):
+                            try:
+                                resp = await client.get(seg_url, headers={**self.headers, 'Referer': referer}, timeout=30)
+                                if resp.status_code == 200:
+                                    filename = Path(urlparse(seg_url).path).name.replace('.jpeg', '.ts')
+                                    (temp_dir / filename).write_bytes(resp.content)
+                                    downloaded += 1
+                                    if progress_callback:
+                                        try:
+                                            progress_callback(downloaded / total_segments * 50, f"{downloaded}/{total_segments}", 'download_segments')
+                                        except TypeError:
+                                            progress_callback(downloaded / total_segments * 50, f"{downloaded}/{total_segments}")
+                                    return
+                            except Exception as exc:
+                                last_seg_exc = exc
+                                await asyncio.sleep(0.5)
+                        print(f"下载片段失败: {last_seg_exc}")
 
                 tasks = [download_segment(url) for url in segment_urls]
                 await asyncio.gather(*tasks)
