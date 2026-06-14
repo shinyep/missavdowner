@@ -135,7 +135,7 @@ function useLoading() {
   animation-fill-mode: both;
   width: 50px;
   height: 50px;
-  background: #6c5ce7;
+  background: #ff9800;
   animation: square-spin 3s 0s cubic-bezier(0.09, 0.57, 0.49, 0.9) infinite;
 }
 .app-loading-wrap {
@@ -147,7 +147,7 @@ function useLoading() {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #1a1a2e;
+  background: linear-gradient(180deg, #fff8f4 0%, #fbebdd 100%);
   z-index: 9;
 }
     `
