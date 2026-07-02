@@ -60,10 +60,28 @@ PAGE_2_HTML = """
 </html>
 """
 
+PAGE_31514_HTML = """
+<html>
+  <head>
+    <title>[??] Buckwheat777 - ???????? ???? #01????????? 118P - Buckwheat777 - ???</title>
+    <meta property="og:title" content="[??] Buckwheat777 - ???????? ???? #01????????? 118P - Buckwheat777 - ???" />
+  </head>
+  <body>
+    <article>
+      <div class="article-content">
+        <img class="item-image__img alignnone size-medium wp-image-42" data-src="/static/images/2026/05/07/%5B%E7%A7%81%E6%88%BF%5D%20Buckwheat777%20-%20%E4%BA%BA%E9%97%B4%E5%B0%A4%E7%89%A9%E6%9E%81%E5%93%81%E5%BE%A1%E5%A7%90%20%E7%A6%8F%E5%88%A9%E7%A7%81%E6%8B%8D%20%2301%EF%BC%9A%E5%BE%A1%E5%A7%90%E7%A7%81%E6%8B%8D%E7%BE%8E%E8%85%BF%E7%BE%8E%E8%83%B8%20118P/OtherXXX-Buckwheat777-The-most-beautiful-lady-in-the-world-Welfare-private-shooting-01-lovecutes.com-001.jpg" src="https://xx.knit.bid/static/zde/timg.gif?v=1732843218" alt="[??] Buckwheat777 - ???????? ???? #01????????? 118P" />
+        <img class="item-image__img alignnone size-medium wp-image-42" data-src="/static/images/2026/05/07/%5B%E7%A7%81%E6%88%BF%5D%20Buckwheat777%20-%20%E4%BA%BA%E9%97%B4%E5%B0%A4%E7%89%A9%E6%9E%81%E5%93%81%E5%BE%A1%E5%A7%90%20%E7%A6%8F%E5%88%A9%E7%A7%81%E6%8B%8D%20%2301%EF%BC%9A%E5%BE%A1%E5%A7%90%E7%A7%81%E6%8B%8D%E7%BE%8E%E8%85%BF%E7%BE%8E%E8%83%B8%20118P/OtherXXX-Buckwheat777-The-most-beautiful-lady-in-the-world-Welfare-private-shooting-01-lovecutes.com-002.jpg" src="https://xx.knit.bid/static/zde/timg.gif?v=1732843218" alt="[??] Buckwheat777 - ???????? ???? #01?????????? 120P" />
+      </div>
+    </article>
+  </body>
+</html>
+"""
+
+
 
 def _make_fake_response(url: str):
     """构造模拟的 httpx.Response 对象。"""
-    text = PAGE_2_HTML if '/page/2/' in url else PAGE_1_HTML
+    text = PAGE_2_HTML if "/page/2/" in url else PAGE_1_HTML
     response = MagicMock()
     response.text = text
     response.raise_for_status = MagicMock()
@@ -95,6 +113,26 @@ class XxKnitBidParserTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertEqual(result.video_url, "https://media.knit.bid/play/test-gallery-video.m3u8")
+
+    async def test_parse_gallery_ignores_recommendation_images_and_keeps_real_title(self):
+        crawler = ImageGalleryCrawler()
+
+        response = MagicMock()
+        response.text = PAGE_31514_HTML
+        response.raise_for_status = MagicMock()
+
+        fake_client = MagicMock()
+        fake_client.get = AsyncMock(return_value=response)
+        fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+        fake_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("httpx.AsyncClient", return_value=fake_client):
+            result = await crawler.parse_gallery("https://xx.knit.bid/article/31514/")
+
+        self.assertEqual(result.title, "[??] Buckwheat777 - ???????? ???? #01????????? 118P")
+        self.assertEqual(len(result.image_urls), 2)
+        self.assertTrue(all(url.startswith("https://xx.knit.bid/static/images/2026/05/07/") for url in result.image_urls))
+        self.assertEqual(result.video_url, "")
 
 
 class NovelImportHelpersTests(unittest.TestCase):
@@ -230,6 +268,76 @@ class GalleryDownloadStatusTests(unittest.TestCase):
         self.assertEqual(task["currentIndex"], 5)
         self.assertEqual(task["failedCount"], 1)
         self.assertEqual(task["detail"], "Import OK (gallery_id=1908, images=160)")
+
+    @patch.object(gallery_server, "_save_gallery_to_history")
+    @patch.object(gallery_server, "import_images_to_novel")
+    @patch.object(gallery_server, "import_video_to_novel")
+    @patch.object(gallery_server.missav_downloader, "download_video")
+    @patch.object(gallery_server.threading, "Thread", _ImmediateThread)
+    @patch.object(gallery_server, "ImageGalleryCrawler")
+    def test_gallery_video_cache_uses_temp_videos_directory(
+        self,
+        mock_crawler_cls,
+        mock_download_video,
+        mock_import_video,
+        mock_import_images,
+        _mock_save_history,
+    ):
+        """回归测试：图集附带视频在入库前应缓存到 Novel 的 temp_videos 目录。"""
+
+        temp_root = self.temp_novel_root
+        expected_dir = temp_root / "img" / "temp_videos"
+
+        async def fake_download_gallery(_gallery_url, _output_dir, progress_callback=None):
+            return {
+                "title": "测试图集视频缓存",
+                "filename": "测试图集视频缓存",
+                "output_path": str(temp_root / "img" / "gallery-images" / "1908"),
+                "image_count": 12,
+                "image_paths": [
+                    str(temp_root / "001.jpg"),
+                    str(temp_root / "002.jpg"),
+                ],
+                "video_url": "https://media.knit.bid/play/test-gallery-video.m3u8",
+                "source_url": "https://xx.knit.bid/en/article/19586/",
+            }
+
+        mock_crawler = MagicMock()
+        mock_crawler.download_gallery = fake_download_gallery
+        mock_crawler_cls.return_value = mock_crawler
+        mock_import_images.return_value = {
+            "success": True,
+            "gallery_id": 1908,
+            "image_count": 12,
+            "message": "Import OK (gallery_id=1908, images=12)",
+        }
+        mock_download_video.side_effect = AsyncMock(return_value=str(expected_dir / "测试图集视频缓存.mp4"))
+        mock_import_video.return_value = {
+            "success": True,
+            "video_id": 42,
+            "message": "Import OK (video_id=42), transcode triggered",
+        }
+
+        client = gallery_server.app.test_client()
+        response = client.post(
+            "/api/gallery/download",
+            json={
+                "galleryUrl": "https://xx.knit.bid/en/article/19586/",
+                "downloadMode": "novel",
+                "novelProjectPath": str(temp_root),
+                "proxy": "",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        task_id = response.get_json()["task_id"]
+
+        status_response = client.get(f"/api/download-status/{task_id}")
+        self.assertEqual(status_response.status_code, 200)
+        task = status_response.get_json()
+
+        self.assertEqual(task["status"], "completed")
+        self.assertEqual(Path(mock_import_video.call_args.args[1]), expected_dir / "测试图集视频缓存.mp4")
 
     @patch.object(gallery_server, "_save_gallery_to_history")
     @patch.object(gallery_server, "import_images_to_novel")

@@ -33,7 +33,6 @@ export interface DownloadTask {
   filename: string
   title: string
   cover: string
-  status: 'pending' | 'downloading' | 'merging' | 'completed' | 'error' | 'paused'
   progress: number
   speed: string
   size: string
@@ -74,6 +73,8 @@ export interface DownloadTask {
   failedImages?: FailedGalleryImage[]
   /** 正在重试的图片序号 */
   retryingImages?: number[]
+  /** 下载状态 */
+  status: 'pending' | 'downloading' | 'merging' | 'completed' | 'error' | 'paused' | 'cancelled'
 }
 
 export interface HistoryRecord {
@@ -140,12 +141,13 @@ export interface ElectronAPI {
     pauseDownload: (taskId: string) => Promise<void>
     resumeDownload: (taskId: string) => Promise<void>
     retryTranscode: (options: { videoId: number; novelProjectPath?: string }) => Promise<{ id: string; status: string; progress: number }>
-    cancelDownload: (taskId: string) => Promise<void>
+    cancelDownload: (taskId: string) => Promise<{ success: boolean; task: DownloadTask }>
   }
   gallery: {
     parse: (options: { galleryUrl: string; proxy?: string }) => Promise<GalleryParseResult>
     download: (options: { galleryUrl: string; outputDir: string; downloadMode?: 'local' | 'novel'; novelProjectPath?: string; proxy?: string }) => Promise<DownloadTask>
     retryImage: (options: { taskId: string; index: number; proxy?: string }) => Promise<{ success: boolean; savedPath?: string; task: DownloadTask }>
+    cancelDownload: (taskId: string) => Promise<{ success: boolean; task: DownloadTask }>
   }
   onDownloadProgress: (callback: (data: {
     taskId: string
@@ -174,6 +176,7 @@ export interface ElectronAPI {
     taskId: string
     filename: string
     outputPath?: string
+    detail?: string
     totalImages?: number
     successCount?: number
     failedCount?: number
@@ -195,4 +198,3 @@ declare global {
     electronAPI: ElectronAPI
   }
 }
-

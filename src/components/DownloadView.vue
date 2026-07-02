@@ -211,6 +211,15 @@
               </div>
             </div>
 
+            <div class="flex items-center gap-2 text-[10px] text-on-surface-variant">
+              <span class="px-1.5 py-0.5 rounded-sm bg-surface-container-highest border border-outline-variant/10">
+                来源：{{ getSourceText(task.source) }}
+              </span>
+              <span class="px-1.5 py-0.5 rounded-sm bg-surface-container-highest border border-outline-variant/10">
+                {{ task.downloadMode === 'novel' ? '入库到 Novel' : '下载到本地' }}
+              </span>
+            </div>
+
             <!-- Phase detail -->
             <div v-if="task.detail" class="text-[10px] text-on-surface-variant truncate">
               {{ task.detail }}
@@ -256,15 +265,35 @@
               {{ task.error }}
             </div>
 
+            <div v-if="task.status === 'completed' || task.status === 'error'" class="grid grid-cols-2 gap-2 text-[10px] text-on-surface-variant mt-0.5">
+              <div class="rounded-md bg-surface-container-highest border border-outline-variant/10 p-2 flex flex-col gap-1">
+                <div class="inline-flex items-center gap-1 text-on-surface">
+                  <span class="material-symbols-outlined text-[11px]">info</span>
+                  <span class="font-semibold">详细信息</span>
+                </div>
+                <span>来源：{{ getSourceText(task.source) }}</span>
+                <span>保存方式：{{ task.downloadMode === 'novel' ? '入库到 Novel' : '下载到本地' }}</span>
+                <span v-if="task.detail" class="break-all">最后详情：{{ task.detail }}</span>
+              </div>
+
+              <div class="rounded-md bg-surface-container-highest border border-outline-variant/10 p-2 flex flex-col gap-1 min-w-0">
+                <div class="inline-flex items-center gap-1 text-on-surface">
+                  <span class="material-symbols-outlined text-[11px]">folder_open</span>
+                  <span class="font-semibold">{{ task.status === 'completed' ? '结果位置' : '输出位置' }}</span>
+                </div>
+                <span class="break-all">{{ task.outputPath || '处理中...' }}</span>
+              </div>
+            </div>
+
             <!-- Actions -->
             <div class="flex gap-1.5">
               <button
                 v-if="task.status === 'completed'"
                 class="flex items-center gap-1 px-2 py-1 bg-surface-container-highest text-on-surface-variant rounded-sm text-[10px] hover:bg-surface-variant transition-colors"
-                @click="openFile(task.outputPath)"
+                @click="openResult(task)"
               >
                 <span class="material-symbols-outlined text-xs">folder_open</span>
-                打开文件
+                {{ task.downloadMode === 'novel' ? '打开目录' : '打开文件' }}
               </button>
               <button
                 v-if="task.status === 'error'"
@@ -284,7 +313,7 @@
               </button>
               <button
                 class="flex items-center gap-1 px-2 py-1 bg-surface-container-highest text-on-surface-variant rounded-sm text-[10px] hover:bg-surface-variant transition-colors ml-auto"
-                @click="removeTask(task.id)"
+                @click="cancelTask(task.id)"
               >
                 <span class="material-symbols-outlined text-xs">close</span>
               </button>
@@ -343,6 +372,8 @@ onMounted(async () => {
         if (data.phase !== undefined) task.phase = data.phase
         if (data.phaseTitle !== undefined) task.phaseTitle = data.phaseTitle
         if (data.detail !== undefined) task.detail = data.detail
+        if (data.outputPath !== undefined) task.outputPath = data.outputPath
+        if (data.source !== undefined) task.source = data.source
         if (data.transcodeProgress !== undefined) task.transcodeProgress = data.transcodeProgress
         if ((data as any).novelVideoId !== undefined) (task as any).novelVideoId = (data as any).novelVideoId
       }
@@ -355,6 +386,10 @@ onMounted(async () => {
       if (task) {
         task.status = 'completed'
         task.progress = 100
+        if (data.filename) task.filename = data.filename
+        if (data.outputPath) task.outputPath = data.outputPath
+        if (data.detail !== undefined) task.detail = data.detail
+        if ((data as any).novelVideoId !== undefined) (task as any).novelVideoId = (data as any).novelVideoId
       }
     })
   }
@@ -517,13 +552,37 @@ async function retryTask(taskId: string) {
   }
 }
 
-function removeTask(taskId: string) {
-  downloadQueue.value = downloadQueue.value.filter(t => t.id !== taskId)
+async function cancelTask(taskId: string) {
+  const task = downloadQueue.value.find(item => item.id === taskId)
+  if (!task) return
+  try {
+    if (task.downloadMode === 'novel' && task.status === 'completed') {
+      downloadQueue.value = downloadQueue.value.filter(t => t.id !== taskId)
+      return
+    }
+    if (window.electronAPI?.video?.cancelDownload) {
+      await window.electronAPI.video.cancelDownload(taskId)
+    }
+    task.status = 'cancelled'
+    task.error = undefined
+    task.detail = '任务已中止'
+  } catch (err: any) {
+    errorMsg.value = err.message || '中止下载失败'
+  }
 }
 
-async function openFile(filePath: string) {
-  if (window.electronAPI?.shell?.openPath) {
-    await window.electronAPI.shell.openPath(filePath)
+async function openResult(task: DownloadTask) {
+  if (task.downloadMode === 'novel') {
+    // 入库模式：打开 Novel 项目的视频目录
+    const novelPath = novelSettings.value.novelProjectPath
+    if (novelPath && window.electronAPI?.shell?.openFolder) {
+      await window.electronAPI.shell.openFolder(novelPath + '\\media\\gallery_videos')
+    }
+  } else {
+    // 本地模式：打开文件
+    if (task.outputPath && window.electronAPI?.shell?.openPath) {
+      await window.electronAPI.shell.openPath(task.outputPath)
+    }
   }
 }
 
@@ -535,8 +594,15 @@ function getStatusText(status: DownloadTask['status']): string {
     completed: '已完成',
     error: '失败',
     paused: '已暂停',
+    cancelled: '已取消',
   }
   return map[status] || status
 }
-</script>
 
+function getSourceText(source?: string) {
+  if (source === 'missav') return 'MissAV'
+  if (source === 'kissjav') return 'KissJAV'
+  if (source === 'tokyomotion') return 'TokyoMotion'
+  return '未知来源'
+}
+</script>

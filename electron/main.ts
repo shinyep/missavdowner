@@ -20,6 +20,9 @@ let pythonProcess: ChildProcess | null = null
 
 // Python 后端端口
 const PYTHON_PORT = 15678
+const BACKEND_READY_TIMEOUT_MS = 15000
+const BACKEND_READY_INTERVAL_MS = 300
+let backendReadyPromise: Promise<void> | null = null
 
 // 获取 ffmpeg 路径
 function getFfmpegPath(): string {
@@ -89,6 +92,10 @@ function getPythonPath(): string {
 
 // 启动后端服务器
 function startPythonBackend() {
+  if (pythonProcess) {
+    return
+  }
+
   const pythonPath = getPythonPath()
   const resPath = getResourcesPath()
   const serverPy = path.join(resPath, 'python', 'server.py')
@@ -142,11 +149,77 @@ function startPythonBackend() {
     pythonProcess.on('close', (code) => {
       console.log(`Server process exited with code ${code}`)
       pythonProcess = null
+      backendReadyPromise = null
     })
   } catch (err) {
     console.error('Error spawning server:', err)
     showPythonError('启动后端服务失败')
   }
+}
+
+function delay(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+async function fetchWithTimeout(url: string, timeoutMs: number) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(url, { signal: controller.signal })
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function pingPythonBackend() {
+  try {
+    const response = await fetchWithTimeout(`http://127.0.0.1:${PYTHON_PORT}/api/health`, 1000)
+    return response.ok
+  } catch {
+    return false
+  }
+}
+
+async function waitForPythonBackend() {
+  const deadline = Date.now() + BACKEND_READY_TIMEOUT_MS
+
+  while (Date.now() < deadline) {
+    if (await pingPythonBackend()) {
+      return
+    }
+    await delay(BACKEND_READY_INTERVAL_MS)
+  }
+
+  throw new Error('后端服务未就绪，请稍后重试或重启应用')
+}
+
+async function ensurePythonBackendReady() {
+  if (await pingPythonBackend()) {
+    return
+  }
+
+  if (!pythonProcess) {
+    startPythonBackend()
+  }
+
+  if (!backendReadyPromise) {
+    backendReadyPromise = waitForPythonBackend().catch((error) => {
+      backendReadyPromise = null
+      throw error
+    })
+  }
+
+  return backendReadyPromise
+}
+
+function normalizePythonAPIError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error || '')
+
+  if (message.includes('All connection attempts failed')) {
+    return new Error('连接失败：无法访问本地后端或目标站点，请检查代理设置，或重启应用后重试')
+  }
+
+  return error instanceof Error ? error : new Error(message || 'API 请求失败')
 }
 
 // 显示 Python 错误提示
@@ -196,6 +269,8 @@ function createWindow() {
 
 // API 调用辅助函数
 async function callPythonAPI(endpoint: string, method = 'GET', body?: any) {
+  await ensurePythonBackendReady()
+
   const url = `http://127.0.0.1:${PYTHON_PORT}${endpoint}`
   
   const options: RequestInit = {
@@ -220,7 +295,7 @@ async function callPythonAPI(endpoint: string, method = 'GET', body?: any) {
     return data
   } catch (error) {
     console.error(`API call failed: ${method} ${endpoint}`, error)
-    throw error
+    throw normalizePythonAPIError(error)
   }
 }
 
@@ -318,15 +393,20 @@ function setupIPC() {
             phase: progress.phase,
             phaseTitle: progress.phaseTitle,
             detail: progress.detail,
+            outputPath: progress.output_path,
             transcodeProgress: progress.transcodeProgress,
-            novelVideoId: progress.novelVideoId,
+            novelVideoId: progress.novel_video_id,
+            source: progress.source
           })
 
           // 下载完成
           if (progress.status === 'completed') {
             win?.webContents.send('download:completed', {
               taskId,
-              filename: result.filename
+              filename: progress.filename || result.filename,
+              outputPath: progress.output_path,
+              novelVideoId: progress.novel_video_id,
+              detail: progress.detail
             })
             return
           }
@@ -358,7 +438,11 @@ function setupIPC() {
         speed: '0 MB/s',
         size: '',
         outputPath: path.join(options.outputDir, result.filename || ''),
-        createdAt: Date.now()
+        createdAt: Date.now(),
+        downloadMode: options.downloadMode || 'local',
+        phase: 'downloading',
+        phaseTitle: '下载中',
+        source: result.source || 'missav'
       }
     } catch (error: any) {
       throw new Error(error.message || '下载失败')
@@ -481,6 +565,14 @@ function setupIPC() {
     }
   })
 
+  ipcMain.handle('gallery:cancelDownload', async (_, taskId: string) => {
+    try {
+      return await callPythonAPI('/api/gallery/cancel', 'POST', { taskId })
+    } catch (error: any) {
+      throw new Error(error.message || '中止图集任务失败')
+    }
+  })
+
   ipcMain.handle('download:pause', async (_, taskId: string) => {
     try {
       await callPythonAPI(`/api/pause-download/${taskId}`, 'POST')
@@ -502,8 +594,11 @@ function setupIPC() {
   ipcMain.handle('history:get', async () => {
     try {
       const result = await callPythonAPI('/api/history')
-      return result.records || []
-    } catch {
+      // 后端当前直接返回数组，兼容旧格式 {records: []}
+      if (Array.isArray(result)) return result
+      return result?.records || []
+    } catch (error) {
+      console.error('Get history error:', error)
       return []
     }
   })
@@ -525,16 +620,29 @@ function setupIPC() {
   })
 
   // 图片代理 - 解决跨域问题
+  // ???? - ??????
   ipcMain.handle('app:fetchImage', async (_, url: string) => {
     try {
-      // 根据 URL 动态设置 Referer
+      // ????????????? file:// ? file:///
+      if (url.startsWith('file://')) {
+        const filePath = fileURLToPath(url)
+        if (!fs.existsSync(filePath)) return null
+        const buffer = fs.readFileSync(filePath)
+        const ext = path.extname(filePath).toLowerCase()
+        const mimeMap: Record<string, string> = {
+          '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp', '.avif': 'image/avif', '.bmp': 'image/bmp'
+        }
+        const contentType = mimeMap[ext] || 'image/jpeg'
+        return `data:${contentType};base64,${buffer.toString('base64')}`
+      }
+
+      // ????????? Referer
       let referer = 'https://missav.ws/'
       if (url.includes('kissjav.com')) {
         referer = 'https://kissjav.com/'
       } else if (url.includes('kkc3.com')) {
         referer = 'https://www.kkc3.com/'
       } else if (url.includes('buondua')) {
-        // buondua CDN 域名：cdn.buondua.us / i2.buondua.us / cdn.buondua.com
         referer = 'https://buondua.com/'
       } else if (url.includes('photos18.com')) {
         referer = 'https://www.photos18.com/'
@@ -569,8 +677,8 @@ function setupIPC() {
 // 应用生命周期
 app.whenReady().then(() => {
   setupIPC()
-  createWindow()
   startPythonBackend()
+  createWindow()
 })
 
 app.on('window-all-closed', () => {
@@ -589,5 +697,3 @@ app.on('activate', () => {
 app.on('before-quit', () => {
   stopPythonBackend()
 })
-
-

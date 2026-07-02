@@ -14,7 +14,7 @@ from flask_cors import CORS
 
 from crawler import crawler as missav_crawler, downloader as missav_downloader
 
-from image_crawler import ImageGalleryCrawler
+from image_crawler import ImageGalleryCrawler, tokyomotion_crawler
 from novel_import import import_video_to_novel, import_images_to_novel
 
 # Optional kissjav support
@@ -36,6 +36,7 @@ app = Flask(__name__)
 CORS(app)
 
 download_tasks: dict[str, dict] = {}
+cancelled_gallery_tasks: set[str] = set()
 
 
 def _is_xx_knit_bid_gallery_url(url: str) -> bool:
@@ -43,9 +44,23 @@ def _is_xx_knit_bid_gallery_url(url: str) -> bool:
     return 'xx.knit.bid' in hostname
 
 
+
 def _resolve_task_failed_images(task: dict) -> list[dict]:
     failed_images = task.get('failedImages') or []
     return [item for item in failed_images if isinstance(item, dict)]
+
+
+def _is_task_cancelled(task_id: str) -> bool:
+    return task_id in cancelled_gallery_tasks
+
+
+def _mark_task_cancelled(task_id: str):
+    cancelled_gallery_tasks.add(task_id)
+    task = download_tasks.get(task_id)
+    if task is not None:
+        task['cancelRequested'] = True
+        task['status'] = 'cancelled'
+        task['detail'] = '用户已中止任务'
 
 
 def _infer_missing_failed_images(task: dict) -> list[dict]:
@@ -121,7 +136,8 @@ def load_history():
         HISTORY_FILE = get_history_file()
     if HISTORY_FILE.exists():
         try:
-            return json.loads(HISTORY_FILE.read_text(encoding='utf-8'))
+            records = json.loads(HISTORY_FILE.read_text(encoding='utf-8'))
+            return _backfill_covers(records)
         except Exception:
             pass
     return []
@@ -129,13 +145,54 @@ def load_history():
 def save_history(records):
     HISTORY_FILE.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding='utf-8')
 
+
+def _infer_cover_from_output(out: str) -> str:
+    if not out:
+        return ''
+    # ???????????
+    if os.path.isdir(out):
+        exts = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif', '.bmp'}
+        try:
+            imgs = sorted(f for f in os.listdir(out) if os.path.splitext(f)[1].lower() in exts)
+            if imgs:
+                return os.path.join(out, imgs[0])
+        except Exception:
+            pass
+        return ''
+    # ?????????????????
+    img_exts = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif', '.bmp'}
+    if os.path.splitext(out)[1].lower() in img_exts and os.path.exists(out):
+        return out
+    return ''
+
+def _backfill_covers(records):
+    changed = False
+    for r in records:
+        cover = r.get('cover', '')
+        # 如果封面为空，或者封面文件不存在，则重新推断
+        if cover and os.path.exists(cover):
+            continue
+        out = r.get('outputPath', '')
+        new_cover = _infer_cover_from_output(out)
+        if new_cover:
+            r['cover'] = new_cover
+            changed = True
+        elif cover:
+            # 封面文件不存在且无法推断，清空避免前端反复请求失败
+            r['cover'] = ''
+            changed = True
+    if changed:
+        save_history(records)
+    return records
 # ----- Utils -----
 def get_crawler_for_url(url: str):
-    hostname = (urlparse(url).hostname or '')
+    hostname = (urlparse(url).hostname or '').lower()
     if 'kissjav' in hostname:
         if _kissjav_available:
             return kissjav_crawler, kissjav_downloader, 'kissjav'
         raise RuntimeError('kissjav crawler not loaded')
+    if 'tokyomotion.net' in hostname:
+        return tokyomotion_crawler, missav_downloader, 'tokyomotion'
     return missav_crawler, missav_downloader, 'missav'
 
 def run_async(coro):
@@ -234,6 +291,14 @@ def parse_video():
         print(f"[Parse] {source}: {url}")
         result = run_async(crawler.parse_video(url))
         result['source'] = source
+        # 关闭 parse 阶段打开的浏览器（/api/parse 仅用于预览，不需要复用）
+        browser_context = result.pop('browser_context', None)
+        result.pop('browser_page', None)
+        if browser_context:
+            try:
+                run_async(browser_context.close())
+            except Exception:
+                pass
         return jsonify(result)
     except Exception as e:
         print(f"[Parse] Error: {e}")
@@ -259,9 +324,13 @@ def start_download():
 
     try:
         video_info = run_async(crawler.parse_video(url))
-        if source == 'kissjav' and not video_info.get('video_url'):
+        has_video_url = bool(video_info.get('video_url'))
+        has_m3u8 = bool(video_info.get('m3u8_url'))
+        if source == 'kissjav' and not has_video_url:
             return jsonify({'error': 'No video URL found'}), 400
-        if source != 'kissjav' and not video_info.get('m3u8_url'):
+        if source == 'tokyomotion' and not has_video_url:
+            return jsonify({'error': 'No video URL found'}), 400
+        if source not in ('kissjav', 'tokyomotion') and not has_m3u8:
             return jsonify({'error': 'No m3u8 URL found'}), 400
 
         task_id = str(uuid.uuid4())[:8]
@@ -287,12 +356,18 @@ def start_download():
                 download_tasks[task_id]['detail'] = detail
 
         def _download():
+            browser_page = video_info.pop('browser_page', None)
+            browser_context = video_info.pop('browser_context', None)
             try:
                 if source == 'kissjav':
                     run_async(downloader.download_video(video_info['video_url'], 'https://kissjav.com/', output_path, _progress))
+                elif source == 'tokyomotion':
+                    run_async(downloader.download_direct_mp4(video_info['video_url'], url, output_path, _progress))
                 else:
                     run_async(downloader.download_video(video_info['m3u8_url'], url, output_path,
-                        auto_merge=auto_merge, keep_temp_files=keep_temp, progress_callback=_progress))
+                        auto_merge=auto_merge, keep_temp_files=keep_temp, progress_callback=_progress,
+                        session_cookies=video_info.get('cookies'), m3u8_text=video_info.get('m3u8_text'),
+                        browser_page=browser_page))
                 download_tasks[task_id]['status'] = 'completed'
                 download_tasks[task_id]['progress'] = 100
                 # Keep phase info visible after completion
@@ -300,6 +375,12 @@ def start_download():
             except Exception as e:
                 download_tasks[task_id]['status'] = 'error'
                 download_tasks[task_id]['error'] = str(e)
+            finally:
+                if browser_context:
+                    try:
+                        run_async(browser_context.close())
+                    except Exception as cleanup_err:
+                        print(f"[Download] 浏览器清理异常: {cleanup_err}")
 
         threading.Thread(target=_download, daemon=True).start()
         return jsonify({'task_id': task_id, 'filename': filename, 'status': 'downloading', 'source': source})
@@ -310,7 +391,6 @@ def start_download():
 def start_download_to_novel():
     data = request.get_json()
     url = data.get('url', '')
-    output_dir = data.get('outputDir', '') or os.path.expanduser('~\\Downloads')
     max_concurrent = data.get('maxConcurrent', 10)
     proxy = data.get('proxy', '')
     auto_merge = data.get('autoMerge', True)
@@ -329,15 +409,21 @@ def start_download_to_novel():
 
     try:
         video_info = run_async(crawler.parse_video(url))
-        if source == 'kissjav' and not video_info.get('video_url'):
+        has_video_url = bool(video_info.get('video_url'))
+        has_m3u8 = bool(video_info.get('m3u8_url'))
+        if source == 'kissjav' and not has_video_url:
             return jsonify({'error': 'No video URL found'}), 400
-        if source != 'kissjav' and not video_info.get('m3u8_url'):
+        if source == 'tokyomotion' and not has_video_url:
+            return jsonify({'error': 'No video URL found'}), 400
+        if source not in ('kissjav', 'tokyomotion') and not has_m3u8:
             return jsonify({'error': 'No m3u8 URL found'}), 400
 
         task_id = str(uuid.uuid4())[:8]
         safe_title = "".join(c for c in video_info['title'] if c.isalnum() or c in ' _-').strip()[:50]
         filename = f"{video_info.get('code', '') or safe_title}.mp4"
-        output_path = os.path.abspath(os.path.join(output_dir, filename))
+        output_dir = Path(novel_project_path) / 'img' / 'temp_videos'
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = str((output_dir / filename).resolve())
 
         download_tasks[task_id] = {
             'id': task_id, 'url': url, 'video_info': video_info,
@@ -358,12 +444,18 @@ def start_download_to_novel():
                 download_tasks[task_id]['detail'] = detail
 
         def _dl():
+            browser_page = video_info.pop('browser_page', None)
+            browser_context = video_info.pop('browser_context', None)
             try:
                 if source == 'kissjav':
                     run_async(downloader.download_video(video_info['video_url'], 'https://kissjav.com/', output_path, _progress))
+                elif source == 'tokyomotion':
+                    run_async(downloader.download_direct_mp4(video_info['video_url'], url, output_path, _progress))
                 else:
                     run_async(downloader.download_video(video_info['m3u8_url'], url, output_path,
-                        auto_merge=auto_merge, keep_temp_files=keep_temp, progress_callback=_progress))
+                        auto_merge=auto_merge, keep_temp_files=keep_temp, progress_callback=_progress,
+                        session_cookies=video_info.get('cookies'), m3u8_text=video_info.get('m3u8_text'),
+                        browser_page=browser_page))
 
                 download_tasks[task_id]['progress'] = 100
 
@@ -395,6 +487,12 @@ def start_download_to_novel():
             except Exception as e:
                 download_tasks[task_id]['status'] = 'error'
                 download_tasks[task_id]['error'] = str(e)
+            finally:
+                if browser_context:
+                    try:
+                        run_async(browser_context.close())
+                    except Exception as cleanup_err:
+                        print(f"[Download] 浏览器清理异常: {cleanup_err}")
 
         threading.Thread(target=_dl, daemon=True).start()
         return jsonify({'task_id': task_id, 'filename': filename, 'status': 'downloading', 'downloadMode': 'novel', 'source': source})
@@ -492,6 +590,8 @@ def start_gallery_download():
             cache_src_path = result.get('output_path', '')
 
             if download_mode == 'novel':
+                if _is_task_cancelled(task_id):
+                    raise RuntimeError('任务已中止')
                 task['phase'] = 'importing'
                 task['phaseTitle'] = _phase_title('importing')
                 task['detail'] = '正在导入 Novel 图集库...'
@@ -508,24 +608,35 @@ def start_gallery_download():
                 task['output_path'] = novel_img_dir
                 result['output_path'] = novel_img_dir
                 video_url = result.get('video_url') or ''
-                if gallery_id and video_url and _is_xx_knit_bid_gallery_url(gallery_url):
+                if gallery_id and video_url and (_is_xx_knit_bid_gallery_url(gallery_url)):
                     task['phase'] = 'downloading'
                     task['phaseTitle'] = _phase_title('downloading')
                     task['detail'] = '图片已入库，正在下载附带视频...'
-                    cache_video_dir = Path(novel_project_path) / 'img' / 'gallery-cache-video'
+                    cache_video_dir = Path(novel_project_path) / 'img' / 'temp_videos'
                     cache_video_dir.mkdir(parents=True, exist_ok=True)
                     safe_name = "".join(c for c in result['title'] if c.isalnum() or c in ' _-').strip()[:50] or 'gallery_video'
                     video_output_path = str((cache_video_dir / f"{safe_name}.mp4").resolve())
                     missav_downloader.set_proxy(proxy if proxy else None)
-                    run_async(
-                        missav_downloader.download_video(
-                            video_url,
-                            gallery_url,
-                            video_output_path,
-                            auto_merge=True,
-                            keep_temp_files=False,
+                    if _is_xx_knit_bid_gallery_url(gallery_url):
+                        run_async(
+                            missav_downloader.download_video(
+                                video_url,
+                                gallery_url,
+                                video_output_path,
+                                auto_merge=True,
+                                keep_temp_files=False,
+                                session_cookies=result.get('cookies'),
+                                m3u8_text=result.get('m3u8_text'),
+                            )
                         )
-                    )
+                    else:
+                        run_async(
+                            missav_downloader.download_direct_mp4(
+                                video_url,
+                                gallery_url,
+                                video_output_path,
+                            )
+                        )
                     task['phase'] = 'importing'
                     task['phaseTitle'] = _phase_title('importing')
                     task['detail'] = '正在把附带视频挂到同一个 Gallery...'
@@ -549,6 +660,17 @@ def start_gallery_download():
                             os.remove(video_output_path)
                     except Exception as cleanup_err:
                         print(f"[Gallery] 视频缓存清理跳过: {cleanup_err}")
+                # 更新 result 中的 image_paths 为导入后的路径，以便历史记录能正确引用
+                novel_img_dir = os.path.join(novel_project_path, 'img', 'gallery_images', str(gallery_id))
+                if os.path.isdir(novel_img_dir):
+                    imported_imgs = sorted(
+                        os.path.join(novel_img_dir, f)
+                        for f in os.listdir(novel_img_dir)
+                        if os.path.splitext(f)[1].lower() in {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif', '.bmp'}
+                    )
+                    if imported_imgs:
+                        result['image_paths'] = imported_imgs
+
                 import shutil
                 try:
                     gallery_dir = Path(cache_src_path)
@@ -558,12 +680,18 @@ def start_gallery_download():
                 except Exception as cleanup_err:
                     print(f"[Gallery] 缓存清理跳过: {cleanup_err}")
 
+            if _is_task_cancelled(task_id):
+                raise RuntimeError('任务已中止')
             task['status'] = 'completed'
             task['progress'] = 100
             _save_gallery_to_history(task_id, result, download_mode)
         except Exception as e:
-            download_tasks[task_id]['status'] = 'error'
-            download_tasks[task_id]['error'] = str(e)
+            if _is_task_cancelled(task_id):
+                download_tasks[task_id]['status'] = 'cancelled'
+                download_tasks[task_id]['detail'] = '用户已中止任务'
+            else:
+                download_tasks[task_id]['status'] = 'error'
+                download_tasks[task_id]['error'] = str(e)
 
     threading.Thread(target=_download, daemon=True).start()
     return jsonify({'task_id': task_id, 'filename': '解析中...', 'status': 'downloading', 'downloadMode': download_mode, 'source': 'gallery'})
@@ -591,7 +719,7 @@ def _save_to_history(task_id, video_info, filename, output_path, mode, source):
 def _save_gallery_to_history(task_id, result, mode):
     record = {
         'id': task_id, 'title': result.get('title', ''), 'filename': result.get('filename', ''),
-        'cover': '', 'actresses': [], 'tags': ['gallery'], 'code': '',
+        'cover': (result.get('image_paths') or [''])[0] or _infer_cover_from_output(result.get('output_path', '')),
         'outputPath': result.get('output_path', ''),
         'fileSize': f"{result.get('image_count', 0)} 张图片",
         'downloadedAt': int(time.time() * 1000),
@@ -609,8 +737,22 @@ def get_download_status(task_id):
     task = download_tasks.get(task_id)
     if not task:
         return jsonify({'error': 'Task not found'}), 404
-    return jsonify(task)
+    payload = dict(task)
+    payload.pop('video_info', None)
+    payload.pop('m3u8_text', None)
+    payload.pop('cookies', None)
+    return jsonify(payload)
 
+
+@app.route('/api/gallery/cancel', methods=['POST'])
+def cancel_gallery_download():
+    data = request.get_json() or {}
+    task_id = data.get('taskId', '')
+    task = download_tasks.get(task_id)
+    if not task:
+        return jsonify({'error': 'Task not found'}), 404
+    _mark_task_cancelled(task_id)
+    return jsonify({'success': True, 'task': task})
 
 @app.route('/api/gallery/retry-image', methods=['POST'])
 def retry_gallery_image():

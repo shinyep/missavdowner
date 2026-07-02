@@ -48,6 +48,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     parse: (options: { galleryUrl: string; proxy?: string }) => ipcRenderer.invoke('gallery:parse', options),
     download: (options: { galleryUrl: string; outputDir: string; downloadMode?: string; novelProjectPath?: string; proxy?: string }) => ipcRenderer.invoke('gallery:download', options),
     retryImage: (options: { taskId: string; index: number; proxy?: string }) => ipcRenderer.invoke('gallery:retryImage', options),
+    cancelDownload: (taskId: string) => ipcRenderer.invoke('gallery:cancelDownload', taskId),
   },
 
   // 下载进度监听

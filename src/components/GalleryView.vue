@@ -383,7 +383,7 @@
               </button>
               <button
                 class="flex items-center gap-1 px-2 py-1 bg-surface-container-highest text-on-surface-variant rounded-sm text-[10px] hover:bg-surface-variant transition-colors ml-auto"
-                @click="removeTask(task.id)"
+                @click="cancelTask(task.id)"
               >
                 <span class="material-symbols-outlined text-xs">close</span>
               </button>
@@ -459,6 +459,8 @@ onMounted(async () => {
     task.status = 'completed'
     task.progress = 100
     successMsg.value = `图集任务完成：${task.filename}`
+    // 通知历史记录页面刷新
+    window.dispatchEvent(new Event('history-updated'))
   })
 
   window.electronAPI?.onDownloadError?.((data) => {
@@ -563,8 +565,18 @@ async function retryFailedImage(task: DownloadTask, index: number) {
   }
 }
 
-function removeTask(taskId: string) {
-  downloadQueue.value = downloadQueue.value.filter(task => task.id !== taskId)
+async function cancelTask(taskId: string) {
+  const task = downloadQueue.value.find(item => item.id === taskId)
+  if (!task) return
+  try {
+    if (window.electronAPI?.gallery?.cancelDownload) {
+      await window.electronAPI.gallery.cancelDownload(taskId)
+    }
+    task.status = 'cancelled'
+    task.detail = '任务已中止'
+  } catch (err: any) {
+    errorMsg.value = err.message || '中止图集任务失败'
+  }
 }
 
 async function openFolder(folderPath: string) {
@@ -580,6 +592,7 @@ function getStatusText(status: DownloadTask['status']) {
     merging: '合并中',
     completed: '已完成',
     error: '失败',
+    cancelled: '已取消',
     paused: '已暂停'
   }[status]
 }
@@ -764,8 +777,4 @@ function getVideoStatusText(task: DownloadTask) {
   return '等待视频阶段'
 }
 </script>
-
-
-
-
 

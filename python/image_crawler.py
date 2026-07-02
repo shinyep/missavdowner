@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 图片图集爬虫模块。
 
@@ -11,11 +11,12 @@ import json
 import os
 import random
 import re
+import socket
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 import httpx
 import inspect
@@ -68,6 +69,7 @@ class ImageGalleryCrawler:
             "headers": headers,
         }
         if self.proxy:
+            self._validate_local_proxy(self.proxy)
             parameters = inspect.signature(httpx.AsyncClient).parameters
             if "proxy" in parameters:
                 options["proxy"] = self.proxy
@@ -75,8 +77,44 @@ class ImageGalleryCrawler:
                 options["proxies"] = self.proxy
         return options
 
+    def _validate_local_proxy(self, proxy: str) -> None:
+        """本地代理端口不可用时，提前返回可读错误。"""
+        parsed = urlparse(proxy)
+        host = (parsed.hostname or "").lower()
+        if host not in {"127.0.0.1", "localhost", "::1"}:
+            return
+
+        port = parsed.port
+        if not port:
+            return
+
+        try:
+            socket.create_connection((parsed.hostname, port), timeout=1.0).close()
+        except OSError as exc:
+            raise RuntimeError(f"代理不可用：{proxy} 未连接，请关闭代理设置或启动对应代理服务") from exc
+
+    def _format_connection_error(self, exc: Exception) -> str:
+        """把 httpx 底层连接失败转换成用户能处理的中文提示。"""
+        message = str(exc)
+        is_connection_error = isinstance(exc, (httpx.ConnectError, httpx.ProxyError))
+        if is_connection_error or "All connection attempts failed" in message:
+            if self.proxy:
+                return f"连接失败：无法通过代理 {self.proxy} 访问目标站点，请检查代理设置或关闭代理后重试"
+            return "连接失败：无法访问目标站点，请检查网络连接、代理设置或稍后重试"
+        return message
+
     async def parse_gallery(self, gallery_url: str) -> GalleryParseResult:
         page_url = self._normalize_gallery_url(gallery_url)
+
+        try:
+            return await self._parse_gallery_by_site(gallery_url, page_url)
+        except Exception as exc:
+            readable_message = self._format_connection_error(exc)
+            if readable_message != str(exc):
+                raise RuntimeError(readable_message) from exc
+            raise
+
+    async def _parse_gallery_by_site(self, gallery_url: str, page_url: str) -> GalleryParseResult:
 
         # kkc3.com 需要 Playwright JS 执行来提取 data-src 属性，走独立解析路径
         if self._is_kkc3_url(page_url):
@@ -92,12 +130,20 @@ class ImageGalleryCrawler:
             return await self._parse_tokyobombers_gallery(page_url)
         if self._is_foamgirl_url(page_url):
             return await self._parse_foamgirl_gallery(page_url)
+        if self._is_nudebird_url(page_url):
+            return await self._parse_nudebird_gallery(page_url)
+        if self._is_hotgirlbiz_url(page_url):
+            return await self._parse_hotgirlbiz_gallery(page_url)
         if self._is_hotgirl_url(page_url):
             return await self._parse_hotgirl_gallery(page_url)
         if self._is_phimvuspot_url(page_url):
             return await self._parse_phimvuspot_gallery(page_url)
         if self._is_goddess247_url(page_url):
             return await self._parse_goddess247_gallery(page_url)
+        if self._is_misskon_url(page_url):
+            return await self._parse_misskon_gallery(page_url)
+        if self._is_portrait_knit_bid_url(page_url):
+            return await self._parse_portrait_knit_bid_gallery(page_url)
         if self._is_xx_knit_bid_url(page_url):
             return await self._parse_xx_knit_bid_gallery(page_url)
 
@@ -415,8 +461,12 @@ class ImageGalleryCrawler:
         data = response.content
         if len(data) < 128:
             raise RuntimeError("图片内容过小")
+        # 根据响应 Content-Type 和 URL 扩展名判断实际图片格式
+        content_type = response.headers.get('content-type', '').lower()
         lower_url = image_url.lower().split("?")[0]
-        is_avif = lower_url.endswith(('.avif', '.heif', '.heic'))
+        is_avif = ('avif' in content_type or 'heif' in content_type or
+                   lower_url.endswith(('.avif', '.heif', '.heic')))
+        # AVIF/HEIF 格式跳过 Pillow 验证（Pillow 默认不支持这些格式）
         if Image is not None and not is_avif:
             from io import BytesIO
 
@@ -433,6 +483,8 @@ class ImageGalleryCrawler:
             return gallery_url.rstrip("/").replace("/gallery/", "/content/") + ".html"
         return gallery_url
 
+
+
     @staticmethod
     def _is_goddess247_url(url: str) -> bool:
         """检测是否为 goddess247.com 图集链接"""
@@ -447,6 +499,54 @@ class ImageGalleryCrawler:
         if not image_urls:
             raise RuntimeError("未从图集页面提取到图片链接")
         return GalleryParseResult(title=gallery_title, page_url=gallery_url, image_urls=image_urls)
+
+    @staticmethod
+    def _is_misskon_url(url: str) -> bool:
+        """检测是否为 misskon.com 图集链接"""
+        return "misskon.com" in urlparse(url).netloc.lower()
+
+    async def _parse_misskon_gallery(self, gallery_url: str) -> GalleryParseResult:
+        """使用 httpx + BeautifulSoup 解析 misskon.com 图集正文图片和文章分页。"""
+        client_options = self._client_options({"User-Agent": USER_AGENT})
+        client_options["timeout"] = httpx.Timeout(30.0)
+
+        async with httpx.AsyncClient(**client_options) as client:
+            async def load_page(url: str) -> str:
+                response = await client.get(url)
+                response.raise_for_status()
+                return response.text
+
+            html_content = await load_page(gallery_url)
+            soup = BeautifulSoup(html_content, "html.parser")
+            gallery_title = self._extract_misskon_title(soup) or self._extract_gallery_title(soup, gallery_url)
+            image_urls: list[str] = []
+            seen: set[str] = set()
+
+            def add(urls: list[str]) -> None:
+                for image_url in urls:
+                    if image_url and image_url not in seen:
+                        seen.add(image_url)
+                        image_urls.append(image_url)
+
+            add(self._extract_misskon_images(soup, gallery_url))
+            for page_url in self._extract_misskon_pagination_urls(soup, gallery_url):
+                try:
+                    page_html = await load_page(page_url)
+                    page_soup = BeautifulSoup(page_html, "html.parser")
+                    add(self._extract_misskon_images(page_soup, page_url))
+                except Exception:
+                    continue
+                await asyncio.sleep(0.5)
+
+        if not image_urls:
+            raise RuntimeError("未从图集页面提取到图片链接")
+
+        return GalleryParseResult(
+            title=gallery_title,
+            page_url=gallery_url,
+            image_urls=image_urls,
+            video_url="",
+        )
 
     # ---- kkc3.com 专用解析 ----
 
@@ -1010,77 +1110,285 @@ class ImageGalleryCrawler:
 
         return found
 
+    # ---- nudebird.biz 专用解析 ----
+
+    @staticmethod
+    def _is_nudebird_url(url: str) -> bool:
+        return urlparse(url).netloc == "nudebird.biz"
+
+    async def _parse_nudebird_gallery(self, gallery_url: str) -> GalleryParseResult:
+        """解析 nudebird.biz 图集。
+
+        nudebird.biz 是 WordPress 站点，正文图片托管在 nudebird.biz/wp-content/uploads/，
+        图片格式为 webp，直接在 img[src] 中（有 base64 占位图间隔）。
+        正文容器为 .entry-content，无分页。
+        logo 在 header img（wp-content/uploads/2021/02/Screenshot-8-1-1.png），需排除。
+        """
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Referer": "https://nudebird.biz/",
+        }
+        async with httpx.AsyncClient(**self._client_options(headers)) as client:
+            html_content = await self._nudebird_fetch(client, gallery_url)
+
+        soup = BeautifulSoup(html_content, "html.parser")
+        gallery_title = self._extract_nudebird_title(soup)
+        if not gallery_title:
+            raise RuntimeError("未能从 nudebird.biz 页面提取图集标题")
+
+        image_urls = self._extract_nudebird_images(soup, gallery_url)
+        if not image_urls:
+            raise RuntimeError("未从 nudebird.biz 图集页面提取到图片链接")
+
+        return GalleryParseResult(
+            title=gallery_title,
+            page_url=gallery_url,
+            image_urls=image_urls,
+        )
+
+    async def _nudebird_fetch(self, client: httpx.AsyncClient, url: str) -> str:
+        """用 httpx 抓取 nudebird.biz 页面 HTML，带重试"""
+        for attempt in range(4):
+            try:
+                resp = await client.get(url, follow_redirects=True)
+                if resp.status_code == 429:
+                    retry_after = 3 + attempt * 2
+                    await asyncio.sleep(retry_after)
+                    continue
+                resp.raise_for_status()
+                return resp.text
+            except Exception:
+                if attempt < 3:
+                    await asyncio.sleep(1 + attempt)
+                    continue
+                raise
+        return ""
+
+    def _extract_nudebird_title(self, soup: BeautifulSoup) -> str:
+        """从 nudebird.biz 页面提取标题。
+
+        优先级：og:title（去掉站点后缀） > h1 > title（去掉站点后缀）。
+        """
+        og = soup.find("meta", attrs={"property": "og:title"})
+        if og and og.get("content", "").strip():
+            raw = og["content"].strip()
+            for sep in [" - ", " | ", " -- "]:
+                if sep in raw:
+                    raw = raw.split(sep)[0].strip()
+            cleaned = self._clean_title(raw)
+            if cleaned:
+                return cleaned
+
+        h1 = soup.select_one("h1")
+        if h1 and h1.get_text(strip=True):
+            cleaned = self._clean_title(h1.get_text(" ", strip=True))
+            if cleaned and "nudebird" not in cleaned.lower():
+                return cleaned
+
+        title_el = soup.select_one("title")
+        if title_el and title_el.get_text(strip=True):
+            raw = title_el.get_text(" ", strip=True)
+            for sep in [" - ", " | ", " -- "]:
+                if sep in raw:
+                    raw = raw.split(sep)[0].strip()
+            cleaned = self._clean_title(raw)
+            if cleaned:
+                return cleaned
+
+        return ""
+
+    def _extract_nudebird_images(self, soup: BeautifulSoup, base_url: str) -> list[str]:
+        """从 nudebird.biz 正文容器 .entry-content 提取图片。
+
+        图片直接在 img[src] 中（有 base64 占位图间隔），格式为 webp。
+        只保留 nudebird.biz/wp-content/uploads/ 下的图片，排除 logo 等。
+        """
+        found: list[str] = []
+        seen: set[str] = set()
+
+        content = soup.select_one(".entry-content") or soup.select_one("article") or soup
+        for img in content.select("img"):
+            src = (img.get("data-src") or img.get("src") or "").strip()
+            if not src or src.startswith("data:"):
+                continue
+            lower = src.lower()
+            # 只保留 wp-content/uploads 下的正文图片
+            if "wp-content/uploads/" not in lower:
+                continue
+            # 排除 logo（2021/02/Screenshot-8-1-1.png）
+            if "screenshot-8-1-1" in lower or "logo" in lower:
+                continue
+            absolute_url = urljoin(base_url, src)
+            if absolute_url in seen:
+                continue
+            seen.add(absolute_url)
+            clean = lower.split("?")[0]
+            if any(clean.endswith(ext) for ext in IMAGE_EXTENSIONS):
+                found.append(absolute_url)
+
+        return found
+
+    # ---- hotgirl.biz 专用解析 ----
+
+    @staticmethod
+    def _is_hotgirlbiz_url(url: str) -> bool:
+        return urlparse(url).netloc == "hotgirl.biz"
+
+    async def _parse_hotgirlbiz_gallery(self, gallery_url: str) -> GalleryParseResult:
+        """解析 hotgirl.biz 图集。
+
+        hotgirl.biz 是 WordPress 站点，正文图片托管在 hotgirl.biz/wp-content/uploads/，
+        图片使用 data-src 懒加载（src 为 base64 占位图）。
+        正文容器为 .entry-content，无分页。
+        logo 在 header img（wp-content/uploads/2017/10/Untitled-1.png），需排除。
+        """
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Referer": "https://hotgirl.biz/",
+        }
+        async with httpx.AsyncClient(**self._client_options(headers)) as client:
+            html_content = await self._hotgirlbiz_fetch(client, gallery_url)
+
+        soup = BeautifulSoup(html_content, "html.parser")
+        gallery_title = self._extract_hotgirlbiz_title(soup)
+        if not gallery_title:
+            raise RuntimeError("未能从 hotgirl.biz 页面提取图集标题")
+
+        image_urls = self._extract_hotgirlbiz_images(soup, gallery_url)
+        if not image_urls:
+            raise RuntimeError("未从 hotgirl.biz 图集页面提取到图片链接")
+
+        return GalleryParseResult(
+            title=gallery_title,
+            page_url=gallery_url,
+            image_urls=image_urls,
+        )
+
+    async def _hotgirlbiz_fetch(self, client: httpx.AsyncClient, url: str) -> str:
+        """用 httpx 抓取 hotgirl.biz 页面 HTML，带重试"""
+        for attempt in range(4):
+            try:
+                resp = await client.get(url, follow_redirects=True)
+                if resp.status_code == 429:
+                    retry_after = 3 + attempt * 2
+                    await asyncio.sleep(retry_after)
+                    continue
+                resp.raise_for_status()
+                return resp.text
+            except Exception:
+                if attempt < 3:
+                    await asyncio.sleep(1 + attempt)
+                    continue
+                raise
+        return ""
+
+    def _extract_hotgirlbiz_title(self, soup: BeautifulSoup) -> str:
+        """从 hotgirl.biz 页面提取标题。
+
+        优先级：og:title（去掉站点后缀） > h1 > title（去掉站点后缀）。
+        """
+        og = soup.find("meta", attrs={"property": "og:title"})
+        if og and og.get("content", "").strip():
+            raw = og["content"].strip()
+            # 去掉 " - Hotgirl.biz" 后缀
+            for sep in [" - ", " | ", " -- "]:
+                if sep in raw:
+                    raw = raw.split(sep)[0].strip()
+            cleaned = self._clean_title(raw)
+            if cleaned:
+                return cleaned
+
+        h1 = soup.select_one("h1")
+        if h1 and h1.get_text(strip=True):
+            cleaned = self._clean_title(h1.get_text(" ", strip=True))
+            if cleaned and "hotgirl" not in cleaned.lower():
+                return cleaned
+
+        title_el = soup.select_one("title")
+        if title_el and title_el.get_text(strip=True):
+            raw = title_el.get_text(" ", strip=True)
+            for sep in [" - ", " | ", " -- "]:
+                if sep in raw:
+                    raw = raw.split(sep)[0].strip()
+            cleaned = self._clean_title(raw)
+            if cleaned:
+                return cleaned
+
+        return ""
+
+    def _extract_hotgirlbiz_images(self, soup: BeautifulSoup, base_url: str) -> list[str]:
+        """从 hotgirl.biz 正文容器 .entry-content 提取图片。
+
+        图片使用 data-src 懒加载（src 为 base64 占位图），优先取 data-src。
+        只保留 hotgirl.biz/wp-content/uploads/ 下的图片，排除 logo、icon 等。
+        """
+        found: list[str] = []
+        seen: set[str] = set()
+
+        content = soup.select_one(".entry-content") or soup.select_one("article") or soup
+        for img in content.select("img"):
+            # 优先 data-src（懒加载真实地址），回退 src
+            src = (img.get("data-src") or img.get("src") or "").strip()
+            if not src or src.startswith("data:"):
+                continue
+            lower = src.lower()
+            # 只保留 wp-content/uploads 下的正文图片
+            if "wp-content/uploads/" not in lower:
+                continue
+            # 排除 logo（2017/10/Untitled-1.png）
+            if "untitled-1" in lower or "logo" in lower:
+                continue
+            absolute_url = urljoin(base_url, src)
+            if absolute_url in seen:
+                continue
+            seen.add(absolute_url)
+            clean = lower.split("?")[0]
+            if any(clean.endswith(ext) for ext in IMAGE_EXTENSIONS):
+                found.append(absolute_url)
+
+        return found
+
     # ---- hotgirl.asia 专用解析 ----
 
     @staticmethod
     def _is_hotgirl_url(url: str) -> bool:
-        return "hotgirl.asia" in urlparse(url).netloc
+        netloc = urlparse(url).netloc
+        return netloc in {"hotgirl.asia"}
 
     async def _parse_hotgirl_gallery(self, gallery_url: str) -> GalleryParseResult:
-        """使用 Playwright 解析 hotgirl.asia 图集。
+        """解析 hotgirl.asia 图集。
 
-        hotgirl.asia 内容图片 CDN (files.everiaclub.com) 有 Cloudflare 保护，
-        必须通过 Playwright 加载页面才能通过 challenge 并捕获图片。
+        优先从静态 HTML 中提取正文内容图片（cdn.hotgirl.asia / everiaclub.com）；
+        若静态结果为空且 Playwright 可用，则回退到浏览器加载以兼容 Cloudflare 保护。
         分页通过 ?num=N 参数实现。
         """
-        if async_playwright is None:
-            raise RuntimeError("hotgirl.asia 需要 Playwright 支持，请安装 playwright 并执行 playwright install chromium")
-
         all_image_urls: list[str] = []
         seen_urls: set[str] = set()
         gallery_title = ""
         preview_b64 = ""
 
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=True)
-            context = await browser.new_context(
-                user_agent=USER_AGENT,
-                viewport={"width": 1365, "height": 900},
-            )
-
+        # 优先从静态 HTML 提取，避免在页面已可解析时强制依赖 Playwright。
+        async with httpx.AsyncClient(**self._client_options({"User-Agent": USER_AGENT, "Referer": "https://hotgirl.asia/"})) as client:
             page_num = 0
             while page_num < 20:
                 page_num += 1
                 page_url = gallery_url if page_num == 1 else f"{gallery_url}?num={page_num}"
 
-                # 用 Playwright 加载页面，自动通过 Cloudflare challenge
-                # 同时拦截图片响应捕获首张预览
-                page = await context.new_page()
-                captured: dict[str, bytes] = {}
-
-                async def on_response(response):
-                    url = response.url
-                    if "everiaclub.com" in url and response.status == 200:
-                        try:
-                            body = await response.body()
-                            if len(body) > 5000:
-                                captured[url] = body
-                        except Exception:
-                            pass
-
-                page.on("response", on_response)
-
                 try:
-                    await page.goto(page_url, wait_until="networkidle", timeout=60000)
-                    await page.wait_for_timeout(2000)
-                    html_content = await page.content()
+                    html_content = await self._hotgirl_fetch(client, page_url)
                 except Exception:
-                    html_content = ""
-                finally:
-                    await page.close()
+                    break
 
                 if not html_content:
                     break
 
                 soup = BeautifulSoup(html_content, "html.parser")
 
-                # 首页提取标题
                 if not gallery_title:
                     gallery_title = self._extract_hotgirl_title(soup)
                     if not gallery_title:
                         raise RuntimeError("未能从 hotgirl 页面提取图集标题")
 
-                # 提取当前页图片
                 page_images = self._extract_hotgirl_images(soup, page_url)
                 if not page_images and page_num > 1:
                     break
@@ -1090,19 +1398,12 @@ class ImageGalleryCrawler:
                         seen_urls.add(img_url)
                         all_image_urls.append(img_url)
 
-                # 捕获首张内容图的 base64 用于预览
-                if not preview_b64 and page_images:
-                    import base64 as _b64
-                    for cap_url, cap_body in captured.items():
-                        if cap_url in seen_urls:
-                            preview_b64 = _b64.b64encode(cap_body).decode("ascii")
-                            break
-
-                # 检查是否有下一页
                 if not self._hotgirl_has_next_page(soup, page_num):
                     break
 
-            await browser.close()
+        # 静态结果为空时，尝试 Playwright 浏览器回退（Cloudflare challenge / JS 懒加载）。
+        if not all_image_urls and async_playwright is not None:
+            all_image_urls, gallery_title, preview_b64 = await self._hotgirl_parse_with_playwright(gallery_url)
 
         if not all_image_urls:
             raise RuntimeError("未从 hotgirl 图集页面提取到图片链接")
@@ -1163,10 +1464,21 @@ class ImageGalleryCrawler:
                     if cleaned:
                         return cleaned
 
+        # ?? og:title?? h1 ??????????????
+        og = soup.select_one('meta[property="og:title"]')
+        if og and og.get("content", "").strip():
+            cleaned = self._clean_title(og["content"].strip())
+            if cleaned:
+                return cleaned
+
         # 回退 h1
         h1 = soup.select_one("h1")
         if h1 and h1.get_text(strip=True):
-            return self._clean_title(h1.get_text(" ", strip=True))
+            h1_text = h1.get_text(" ", strip=True)
+            cleaned = self._clean_title(h1_text)
+            # hotgirl.asia ??? h1 ????????????????
+            if cleaned and "hotgirl" not in cleaned.lower():
+                return cleaned
 
         # 回退 <title>
         title_el = soup.select_one("title")
@@ -1182,21 +1494,28 @@ class ImageGalleryCrawler:
         return ""
 
     def _extract_hotgirl_images(self, soup: BeautifulSoup, base_url: str) -> list[str]:
-        """从 hotgirl 页面提取图片 URL。
+        """从 hotgirl 页面提取正文内容图片 URL。
 
-        内容图片 CDN 为 files.everiaclub.com，分布在 div.page-detail 容器中。
-        通过 CDN 域名匹配精准提取内容图，排除侧栏缩略图、logo、rating 等。
+        hotgirl 族站点（hotgirl.asia / nudebird.biz）正文内容图主要托管在
+        cdn.hotgirl.asia，历史样本仍包含 files.everiaclub.com。优先从正文容器提取图片，
+        避免误抓评分、站点 logo、导航栏、侧栏等非正文图片。
         """
         found: list[str] = []
         seen: set[str] = set()
 
-        for img in soup.select("img"):
+        content = (
+            soup.select_one("div.page-detail")
+            or soup.select_one(".entry-content")
+            or soup.select_one("article")
+            or soup
+        )
+        for img in content.select("img"):
             src = (img.get("data-src") or img.get("data-lazy-src") or img.get("src") or "").strip()
             if not src or src.startswith("data:"):
                 continue
             lower = src.lower()
-            # 只提取 everiaclub CDN 上的内容图片
-            if "everiaclub.com" not in lower:
+            # 只提取正文内容图域名，排除站点自身附件、评分、缩略图等。
+            if "cdn.hotgirl.asia" not in lower and "everiaclub.com" not in lower:
                 continue
             absolute_url = urljoin(base_url, src)
             if absolute_url in seen:
@@ -1218,6 +1537,85 @@ class ImageGalleryCrawler:
             except ValueError:
                 continue
         return False
+
+    async def _hotgirl_parse_with_playwright(self, gallery_url: str) -> tuple[list[str], str, str]:
+        """??????????? Playwright ???? hotgirl ???"""
+        if async_playwright is None:
+            return [], "", ""
+
+        all_image_urls: list[str] = []
+        seen_urls: set[str] = set()
+        gallery_title = ""
+        preview_b64 = ""
+
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent=USER_AGENT,
+                viewport={"width": 1365, "height": 900},
+            )
+
+            page_num = 0
+            while page_num < 20:
+                page_num += 1
+                page_url = gallery_url if page_num == 1 else f"{gallery_url}?num={page_num}"
+
+                page = await context.new_page()
+                captured: dict[str, bytes] = {}
+
+                async def on_response(response):
+                    url = response.url
+                    if ("cdn.hotgirl.asia" in url or "everiaclub.com" in url) and response.status == 200:
+                        try:
+                            body = await response.body()
+                            if len(body) > 5000:
+                                captured[url] = body
+                        except Exception:
+                            pass
+
+                page.on("response", on_response)
+
+                try:
+                    await page.goto(page_url, wait_until="networkidle", timeout=60000)
+                    await page.wait_for_timeout(2000)
+                    html_content = await page.content()
+                except Exception:
+                    html_content = ""
+                finally:
+                    await page.close()
+
+                if not html_content:
+                    break
+
+                soup = BeautifulSoup(html_content, "html.parser")
+
+                if not gallery_title:
+                    gallery_title = self._extract_hotgirl_title(soup)
+                    if not gallery_title:
+                        raise RuntimeError("??? hotgirl ????????")
+
+                page_images = self._extract_hotgirl_images(soup, page_url)
+                if not page_images and page_num > 1:
+                    break
+
+                for img_url in page_images:
+                    if img_url not in seen_urls:
+                        seen_urls.add(img_url)
+                        all_image_urls.append(img_url)
+
+                if not preview_b64 and page_images:
+                    import base64 as _b64
+                    for cap_url, cap_body in captured.items():
+                        if cap_url in seen_urls:
+                            preview_b64 = _b64.b64encode(cap_body).decode("ascii")
+                            break
+
+                if not self._hotgirl_has_next_page(soup, page_num):
+                    break
+
+            await browser.close()
+
+        return all_image_urls, gallery_title, preview_b64
 
     # ---- foamgirl.net 专用解析 ----
 
@@ -1347,7 +1745,11 @@ class ImageGalleryCrawler:
         # 优先 h1
         h1 = soup.select_one("h1")
         if h1 and h1.get_text(strip=True):
-            return self._clean_title(h1.get_text(" ", strip=True))
+            h1_text = h1.get_text(" ", strip=True)
+            cleaned = self._clean_title(h1_text)
+            # hotgirl.asia ??? h1 ????????????????
+            if cleaned and "hotgirl" not in cleaned.lower():
+                return cleaned
 
         # 回退 <title>
         title_el = soup.select_one("title")
@@ -1466,7 +1868,11 @@ class ImageGalleryCrawler:
         # 优先 h1
         h1 = soup.select_one("h1.entry-title, h1")
         if h1 and h1.get_text(strip=True):
-            return self._clean_title(h1.get_text(" ", strip=True))
+            h1_text = h1.get_text(" ", strip=True)
+            cleaned = self._clean_title(h1_text)
+            # hotgirl.asia ??? h1 ????????????????
+            if cleaned and "hotgirl" not in cleaned.lower():
+                return cleaned
 
         # 回退 <title>
         title_el = soup.select_one("title")
@@ -1815,6 +2221,98 @@ class ImageGalleryCrawler:
 
         return found
 
+    def _extract_misskon_title(self, soup: BeautifulSoup) -> str:
+        """提取 misskon 文章标题，优先使用文章 h1。"""
+        for selector in ["article h1.name.post-title.entry-title", "article h1.entry-title", "article h1"]:
+            element = soup.select_one(selector)
+            if element:
+                title = self._clean_title(element.get_text(" ", strip=True))
+                if title:
+                    return title
+
+        for script in soup.select('script[type="application/ld+json"]'):
+            raw = script.string or script.get_text()
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except Exception:
+                continue
+            items = data if isinstance(data, list) else [data]
+            for item in items:
+                if not isinstance(item, dict) or item.get("@type") != "Article":
+                    continue
+                for key in ["headline", "name"]:
+                    title = self._clean_title(item.get(key))
+                    if title:
+                        return title
+
+        title_element = soup.select_one("title")
+        if title_element:
+            title = self._clean_title(title_element.get_text(" ", strip=True))
+            if title:
+                title = re.sub(r"\s*[-–]\s*Page\s+\d+\s*[-–]\s*MissKon\.com\s*$", "", title, flags=re.IGNORECASE)
+                title = re.sub(r"\s*[-–]\s*MissKon\.com\s*$", "", title, flags=re.IGNORECASE)
+                title = self._clean_title(title)
+                if title:
+                    return title
+        return ""
+
+    def _extract_misskon_images(self, soup: BeautifulSoup, base_url: str) -> list[str]:
+        """只从 misskon 正文容器提取图片，优先使用 data-src。"""
+        found: list[str] = []
+        seen: set[str] = set()
+        containers = [
+            soup.select_one("article .entry"),
+            soup.select_one(".post-inner .entry"),
+            soup.select_one("article"),
+        ]
+
+        for container in containers:
+            if container is None:
+                continue
+            for element in container.select("img"):
+                src = (
+                    element.get("data-src")
+                    or element.get("data-lazy-src")
+                    or element.get("src")
+                )
+                if not src:
+                    continue
+                absolute_url = urljoin(base_url, src)
+                lower_url = absolute_url.lower()
+                if lower_url.startswith("data:"):
+                    continue
+                if "/uploads/" not in lower_url:
+                    continue
+                if any(token in lower_url for token in ("logo", "icon", "avatar", "banner", "pixel", "related")):
+                    continue
+                self._append_image_url(found, seen, base_url, absolute_url)
+            if found:
+                return found
+
+        return found
+
+    def _extract_misskon_pagination_urls(self, soup: BeautifulSoup, base_url: str) -> list[str]:
+        """提取 misskon 文章页码导航链接。"""
+        found: list[str] = []
+        seen: set[str] = set()
+        for element in soup.select("article .page-link a[href], .entry .page-link a[href]"):
+            href = element.get("href", "").strip()
+            if not href:
+                continue
+            absolute_url = urljoin(base_url, href)
+            parsed = urlparse(absolute_url)
+            if "misskon.com" not in parsed.netloc.lower():
+                continue
+            if absolute_url == base_url:
+                continue
+            if absolute_url in seen:
+                continue
+            seen.add(absolute_url)
+            found.append(absolute_url)
+        return found
+
     # ---- 通用 HTML 解析 ----
 
     def _extract_gallery_title(self, soup: BeautifulSoup, page_url: str) -> str:
@@ -1944,6 +2442,127 @@ class ImageGalleryCrawler:
             callback(round(progress, 2), speed, phase, detail, extra or {})
 
     @staticmethod
+    def _is_portrait_knit_bid_url(url: str) -> bool:
+        """判断是否为 portrait.knit.bid 图集链接。"""
+        return urlparse(url).netloc.lower() == "portrait.knit.bid"
+
+    async def _parse_portrait_knit_bid_gallery(self, gallery_url: str) -> GalleryParseResult:
+        """解析 portrait.knit.bid 图集正文图片，并兼容 ?page=N 分页。"""
+        client_options = self._client_options({"User-Agent": USER_AGENT, "Referer": gallery_url})
+        client_options["timeout"] = httpx.Timeout(30.0)
+
+        async with httpx.AsyncClient(**client_options) as client:
+            async def load_page(url: str) -> str:
+                response = await client.get(url)
+                response.raise_for_status()
+                return response.text
+
+            html_content = await load_page(gallery_url)
+            soup = BeautifulSoup(html_content, "html.parser")
+            title = self._extract_portrait_knit_bid_title(soup, gallery_url)
+            image_urls: list[str] = []
+            seen: set[str] = set()
+
+            def add(urls: list[str]) -> None:
+                for image_url in urls:
+                    if image_url and image_url not in seen:
+                        seen.add(image_url)
+                        image_urls.append(image_url)
+
+            add(self._extract_portrait_knit_bid_images(soup, gallery_url))
+
+            for page_url in self._extract_portrait_knit_bid_pagination_urls(soup, gallery_url):
+                try:
+                    page_html = await load_page(page_url)
+                    page_soup = BeautifulSoup(page_html, "html.parser")
+                    add(self._extract_portrait_knit_bid_images(page_soup, page_url))
+                except Exception:
+                    continue
+                await asyncio.sleep(0.5)
+
+        if not image_urls:
+            raise RuntimeError("未从图集页面提取到图片链接")
+
+        return GalleryParseResult(
+            title=title,
+            page_url=gallery_url,
+            image_urls=image_urls,
+            video_url="",
+        )
+
+    def _extract_portrait_knit_bid_title(self, soup: BeautifulSoup, page_url: str) -> str:
+        """提取 portrait.knit.bid 图集标题，优先使用 meta 标题。"""
+        for selector in ['meta[name="og:title"]', 'meta[property="og:title"]', 'meta[name="twitter:title"]', "title"]:
+            element = soup.select_one(selector)
+            if not element:
+                continue
+            raw_title = (element.get("content") or element.get_text(" ", strip=True)).strip()
+            title = self._clean_title(raw_title)
+            if title:
+                return title
+        return self._extract_gallery_title(soup, page_url)
+
+    def _extract_portrait_knit_bid_images(self, soup: BeautifulSoup, base_url: str) -> list[str]:
+        """只提取 portrait.knit.bid 正文大图，排除相关推荐缩略图。"""
+        found: list[str] = []
+        seen: set[str] = set()
+        containers = [
+            soup.select_one(".page-content .container"),
+            soup.select_one(".page-content"),
+            soup.select_one("article"),
+            soup,
+        ]
+
+        for container in containers:
+            if container is None:
+                continue
+            for element in container.select("img[data-src], img[src]"):
+                classes = set(element.get("class") or [])
+                if "card-img-top" in classes:
+                    continue
+                src = (element.get("data-src") or element.get("src") or "").strip()
+                if not src or src.startswith("data:"):
+                    continue
+                absolute_url = urljoin(base_url, src)
+                lower_url = absolute_url.lower()
+                if "/static/uploadfile/" not in lower_url:
+                    continue
+                if any(token in lower_url for token in ("favicon", "logo", "icon", "avatar", "banner", "pixel", "loading")):
+                    continue
+                if "img-fluid" not in classes and found:
+                    continue
+                if not urlparse(absolute_url).path.lower().endswith(IMAGE_EXTENSIONS):
+                    continue
+                if absolute_url in seen:
+                    continue
+                seen.add(absolute_url)
+                found.append(absolute_url)
+            if found:
+                return found
+        return found
+
+    def _extract_portrait_knit_bid_pagination_urls(self, soup: BeautifulSoup, base_url: str) -> list[str]:
+        """从 gotoPage(N) 分页导航生成 portrait.knit.bid 的 ?page=N URL。"""
+        page_numbers: set[int] = set()
+        for element in soup.select(".pagination a.page-link[href]"):
+            href = (element.get("href") or "").strip()
+            match = re.search(r"gotoPage\((\d+)\)", href)
+            if not match:
+                continue
+            page_number = int(match.group(1))
+            if page_number > 1:
+                page_numbers.add(page_number)
+
+        return [self._with_query_param(base_url, "page", str(page_number)) for page_number in sorted(page_numbers)]
+
+    def _with_query_param(self, url: str, key: str, value: str) -> str:
+        """返回设置指定查询参数后的 URL。"""
+        parsed = urlparse(url)
+        query_items = [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=True) if k != key]
+        query_items.append((key, value))
+        return urlunparse(parsed._replace(query=urlencode(query_items)))
+
+    @staticmethod
     def _is_xx_knit_bid_url(url: str) -> bool:
         """判断是否为 xx.knit.bid 图集链接。"""
         return "xx.knit.bid" in urlparse(url).netloc.lower()
@@ -2045,6 +2664,7 @@ class ImageGalleryCrawler:
         if title:
             return title
 
+        alt_title = self._extract_xx_knit_bid_alt_title(soup)
         for selector in ['meta[property="og:title"]', 'meta[name="twitter:title"]', 'title']:
             element = soup.select_one(selector)
             content = element.get("content", "").strip() if element else ""
@@ -2052,8 +2672,32 @@ class ImageGalleryCrawler:
                 content = element.get_text(" ", strip=True)
             title = self._clean_title(content)
             if title:
+                if alt_title and title.startswith(alt_title):
+                    return alt_title
                 return title
+        if alt_title:
+            return alt_title
         return self._extract_gallery_title(soup, soup.title.get_text() if soup.title else "")
+
+    def _extract_xx_knit_bid_alt_title(self, soup: BeautifulSoup) -> str:
+        """从正文首张有效图片的 alt 提取 xx.knit.bid 图集标题。"""
+        containers = [soup.select_one(".article-content"), soup.select_one("article")]
+        for container in containers:
+            if container is None:
+                continue
+            for element in container.select("img[alt]"):
+                src = (element.get("data-src") or element.get("src") or "").strip()
+                if not src or src.startswith("data:"):
+                    continue
+                lower_url = src.lower()
+                if any(token in lower_url for token in ("/static/zde/", "timg.gif", "favicon", "hot_search", "video-play.png", "/static/hot_")):
+                    continue
+                if "/static/images/" not in lower_url:
+                    continue
+                alt = self._clean_title(element.get("alt", "").strip())
+                if alt:
+                    return alt
+        return ""
 
     def _extract_xx_knit_bid_images_from_jsonld(self, json_ld: dict, base_url: str) -> list[str]:
         """从 xx.knit.bid 的 ImageGallery JSON-LD 中提取图片链接。"""
@@ -2084,10 +2728,11 @@ class ImageGalleryCrawler:
         return 1
 
     def _extract_xx_knit_bid_images_from_soup(self, soup: BeautifulSoup, base_url: str) -> list[str]:
-        """当 xx.knit.bid 缺少 JSON-LD 时，从正文 DOM 中兜底提取图片。"""
+        """? xx.knit.bid ?? JSON-LD ????? DOM ????????"""
         found: list[str] = []
         seen: set[str] = set()
-        for container in [soup.select_one(".article-content"), soup.select_one("article"), soup]:
+        containers = [soup.select_one(".article-content"), soup.select_one("article")]
+        for container in containers:
             if container is None:
                 continue
             for element in container.select("img[data-src], img[src]"):
@@ -2095,6 +2740,11 @@ class ImageGalleryCrawler:
                 if not src or src.startswith("data:"):
                     continue
                 absolute_url = urljoin(base_url, src)
+                lower_url = absolute_url.lower()
+                if any(token in lower_url for token in ("/static/zde/", "timg.gif", "favicon", "hot_search", "video-play.png", "/static/hot_")):
+                    continue
+                if "/static/images/" not in lower_url:
+                    continue
                 if absolute_url in seen:
                     continue
                 seen.add(absolute_url)
@@ -2141,3 +2791,99 @@ class ImageGalleryCrawler:
                     if isinstance(content_url, str) and content_url.strip():
                         return urljoin(base_url, content_url.strip())
         return ""
+
+class TokyoMotionCrawler:
+    """TokyoMotion 视频站爬虫，对齐 MissavCrawler 的 parse_video 接口。"""
+
+    def __init__(self, proxy: str = ""):
+        self.proxy = proxy.strip() or None
+
+    def _client_options(self, headers: dict[str, str]) -> dict:
+        import inspect
+        options = {
+            "timeout": httpx.Timeout(60.0),
+            "follow_redirects": True,
+            "headers": headers,
+        }
+        if self.proxy:
+            parameters = inspect.signature(httpx.AsyncClient).parameters
+            if "proxy" in parameters:
+                options["proxy"] = self.proxy
+            elif "proxies" in parameters:
+                options["proxies"] = self.proxy
+        return options
+
+    async def parse_video(self, url: str) -> dict:
+        """解析 TokyoMotion 视频页面，返回对齐 missav 的视频信息字典。"""
+        client_options = self._client_options({"User-Agent": USER_AGENT})
+        async with httpx.AsyncClient(**client_options) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            html_content = response.text
+
+        soup = BeautifulSoup(html_content, "html.parser")
+        title = self._extract_title(soup)
+        cover = self._extract_cover(soup, url)
+        video_url = self._extract_video_url(soup, url)
+        tags = self._extract_tags(soup)
+
+        return {
+            "title": title,
+            "cover": cover,
+            "video_url": video_url,
+            "m3u8_url": None,
+            "actresses": [],
+            "tags": tags,
+            "code": "",
+        }
+
+    def _extract_title(self, soup: BeautifulSoup) -> str:
+        for selector in ['meta[property="og:title"]', 'title']:
+            element = soup.select_one(selector)
+            if not element:
+                continue
+            raw = (element.get("content") or element.get_text(" ", strip=True)).strip()
+            title = re.sub(r"\s*-\s*TOKYO Motion$", "", raw, flags=re.IGNORECASE).strip()
+            if title:
+                return title
+        return "未知标题"
+
+    def _extract_cover(self, soup: BeautifulSoup, base_url: str) -> str:
+        for selector in ['meta[property="og:image"]', 'video[poster]']:
+            element = soup.select_one(selector)
+            if element:
+                value = (element.get("content") or element.get("poster") or "").strip()
+                if value:
+                    return urljoin(base_url, value)
+        return ""
+
+    def _extract_video_url(self, soup: BeautifulSoup, base_url: str) -> str:
+        video = soup.select_one("#vjsplayer") or soup.select_one("video")
+        if video:
+            for source in video.select("source[src]"):
+                if (source.get("title") or "").strip().upper() == "HD":
+                    src = (source.get("src") or "").strip()
+                    if src:
+                        return urljoin(base_url, src)
+            for source in video.select("source[src]"):
+                src = (source.get("src") or "").strip()
+                if src:
+                    return urljoin(base_url, src)
+        fallback = soup.select_one("video source[src]")
+        if fallback:
+            src = (fallback.get("src") or "").strip()
+            if src:
+                return urljoin(base_url, src)
+        return ""
+
+    def _extract_tags(self, soup: BeautifulSoup) -> list[str]:
+        tags = []
+        for meta in soup.select('meta[property="video:tag"]'):
+            content = (meta.get("content") or "").strip()
+            if content:
+                tags.append(content)
+        return tags
+
+
+# 单例
+tokyomotion_crawler = TokyoMotionCrawler()

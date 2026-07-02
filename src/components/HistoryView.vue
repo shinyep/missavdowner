@@ -41,7 +41,7 @@
             <!-- 封面 -->
             <div
               class="w-28 h-16 rounded-sm bg-surface-variant bg-cover bg-center flex-shrink-0"
-              :style="{ backgroundImage: `url(${item.cover})` }"
+              :style="coverMap[item.id] ? { backgroundImage: `url(${coverMap[item.id]})` } : {}"
             ></div>
             <!-- 信息 -->
             <div class="flex-1 min-w-0">
@@ -96,6 +96,8 @@ const props = defineProps<{
 
 const searchQuery = ref('')
 const historyList = ref<HistoryRecord[]>([])
+// 封面图缓存，key 为 history id，value 为可用的图片 URL 或 data URL
+const coverMap = ref<Record<string, string>>({})
 
 const filteredHistory = computed(() => {
   if (!searchQuery.value.trim()) return historyList.value
@@ -131,6 +133,8 @@ watch(() => props.active, (isActive) => {
 async function loadHistory() {
   if (window.electronAPI?.history?.get) {
     historyList.value = await window.electronAPI.history.get()
+    // 加载封面图
+    loadAllCovers()
   }
 }
 
@@ -160,6 +164,24 @@ async function openFolder(filePath: string) {
 
 function isRealPath(path: string): boolean {
   return /^[A-Za-z]:[\\/]/.test(path)
+}
+
+async function loadAllCovers() {
+  const newMap: Record<string, string> = {}
+  for (const item of historyList.value) {
+    if (!item.cover) continue
+    // 统一通过 fetchImage 代理加载封面（本地路径转 file:/// 由主进程处理）
+    const coverUrl = isRealPath(item.cover) ? 'file:///' + item.cover.replace(/\\/g, '/') : item.cover
+    if (window.electronAPI?.app?.fetchImage) {
+      try {
+        const dataUrl = await window.electronAPI.app.fetchImage(coverUrl)
+        if (dataUrl) newMap[item.id] = dataUrl
+      } catch {}
+    } else {
+      newMap[item.id] = coverUrl
+    }
+  }
+  coverMap.value = newMap
 }
 
 function formatDate(timestamp: number): string {
